@@ -3,6 +3,7 @@ import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
 import { ECSClient, RunTaskCommand } from '@aws-sdk/client-ecs';
 import { v4 as uuidv4 } from 'uuid';
+import * as path from 'path';
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -18,6 +19,7 @@ const ECS_SECURITY_GROUP = process.env.ECS_SECURITY_GROUP!;
 interface DeployRequest {
   repository: string;
   branch: string;
+  projectRoot?: string;
 }
 
 interface DeploymentRecord {
@@ -26,6 +28,7 @@ interface DeploymentRecord {
   status: 'pending' | 'deploying' | 'success' | 'failed';
   repository: string;
   branch: string;
+  projectRoot?: string;
   message?: string;
   logs?: string[];
   deployedResources?: Record<string, any>;
@@ -131,6 +134,37 @@ async function handleDeploy(event: APIGatewayProxyEvent): Promise<APIGatewayProx
     };
   }
 
+  // Validate projectRoot if provided
+  if (request.projectRoot) {
+    // Remove leading/trailing slashes
+    request.projectRoot = request.projectRoot.replace(/^\/+|\/+$/g, '');
+
+    // Validate path format (no .. or absolute paths)
+    if (request.projectRoot.includes('..') || path.isAbsolute(request.projectRoot)) {
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({
+          error: 'Invalid projectRoot: must be a relative path without ".."',
+          example: 'functions/my-lambda',
+        }),
+      };
+    }
+
+    // Validate characters (alphanumeric, dash, underscore, slash)
+    const pathPattern = /^[a-zA-Z0-9_\-\/]+$/;
+    if (!pathPattern.test(request.projectRoot)) {
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({
+          error: 'Invalid projectRoot: only alphanumeric, dash, underscore, and slash allowed',
+          example: 'functions/my-lambda',
+        }),
+      };
+    }
+  }
+
   // Generate session ID
   const sessionId = uuidv4();
   const timestamp = Date.now();
@@ -142,6 +176,7 @@ async function handleDeploy(event: APIGatewayProxyEvent): Promise<APIGatewayProx
     status: 'pending',
     repository: request.repository,
     branch: request.branch,
+    projectRoot: request.projectRoot,
     message: 'Deployment queued',
     logs: ['Deployment initiated'],
   };
@@ -176,6 +211,7 @@ async function handleDeploy(event: APIGatewayProxyEvent): Promise<APIGatewayProx
                 { name: 'SESSION_ID', value: sessionId },
                 { name: 'REPOSITORY', value: request.repository },
                 { name: 'BRANCH', value: request.branch },
+                { name: 'PROJECT_ROOT', value: request.projectRoot || '' },
               ],
             },
           ],
@@ -220,6 +256,7 @@ async function handleDeploy(event: APIGatewayProxyEvent): Promise<APIGatewayProx
       message: 'Deployment initiated successfully',
       repository: request.repository,
       branch: request.branch,
+      projectRoot: request.projectRoot,
     }),
   };
 }
@@ -264,6 +301,7 @@ async function handleGetStatus(sessionId: string): Promise<APIGatewayProxyResult
       status: latestRecord.status,
       repository: latestRecord.repository,
       branch: latestRecord.branch,
+      projectRoot: latestRecord.projectRoot,
       message: latestRecord.message,
       logs: allLogs,
       deployedResources: latestRecord.deployedResources,

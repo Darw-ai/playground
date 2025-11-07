@@ -32,6 +32,7 @@ const AWS_REGION = process.env.AWS_REGION!;
 const SESSION_ID = process.env.SESSION_ID!;
 const REPOSITORY = process.env.REPOSITORY!;
 const BRANCH = process.env.BRANCH!;
+const PROJECT_ROOT = process.env.PROJECT_ROOT || '';
 
 interface DeploymentLog {
   sessionId: string;
@@ -39,6 +40,7 @@ interface DeploymentLog {
   status: 'pending' | 'deploying' | 'success' | 'failed';
   repository: string;
   branch: string;
+  projectRoot?: string;
   message?: string;
   logs?: string[];
   deployedResources?: Record<string, any>;
@@ -47,18 +49,18 @@ interface DeploymentLog {
 
 async function main() {
   console.log(`Starting deployment for session ${SESSION_ID}`);
-  console.log(`Repository: ${REPOSITORY}, Branch: ${BRANCH}`);
+  console.log(`Repository: ${REPOSITORY}, Branch: ${BRANCH}${PROJECT_ROOT ? `, Project Root: ${PROJECT_ROOT}` : ''}`);
 
   try {
     await updateDeploymentStatus(SESSION_ID, 'deploying', 'Cloning repository...', [
       'Starting deployment process',
-      `Cloning ${REPOSITORY} (branch: ${BRANCH})`,
+      `Cloning ${REPOSITORY} (branch: ${BRANCH})${PROJECT_ROOT ? ` with project root: ${PROJECT_ROOT}` : ''}`,
     ]);
 
     // Clone repository
-    const repoPath = await cloneRepository(SESSION_ID, REPOSITORY, BRANCH);
+    const repoPath = await cloneRepository(SESSION_ID, REPOSITORY, BRANCH, PROJECT_ROOT);
 
-    await addLog(SESSION_ID, 'Repository cloned successfully');
+    await addLog(SESSION_ID, `Repository cloned successfully${PROJECT_ROOT ? ` (using project root: ${PROJECT_ROOT})` : ''}`);
 
     // Detect IaC type
     const iacType = detectIaCType(repoPath);
@@ -102,7 +104,7 @@ async function main() {
   }
 }
 
-async function cloneRepository(sessionId: string, repository: string, branch: string): Promise<string> {
+async function cloneRepository(sessionId: string, repository: string, branch: string, projectRoot?: string): Promise<string> {
   const tmpDir = `/tmp/${sessionId}`;
 
   // Clean up if exists
@@ -114,6 +116,24 @@ async function cloneRepository(sessionId: string, repository: string, branch: st
 
   const git = simpleGit();
   await git.clone(repository, tmpDir, ['--branch', branch, '--single-branch', '--depth', '1']);
+
+  // If projectRoot is specified, adjust the path
+  if (projectRoot) {
+    const projectPath = path.join(tmpDir, projectRoot);
+
+    // Verify the project directory exists
+    if (!fs.existsSync(projectPath)) {
+      throw new Error(`Project root directory not found: ${projectRoot}`);
+    }
+
+    // Verify it's a directory
+    const stat = fs.statSync(projectPath);
+    if (!stat.isDirectory()) {
+      throw new Error(`Project root is not a directory: ${projectRoot}`);
+    }
+
+    return projectPath;
+  }
 
   return tmpDir;
 }
@@ -300,12 +320,12 @@ async function deploySimpleLambda(sessionId: string, repoPath: string): Promise<
   }
 
   // Determine handler
-  const files = fs.readdirSync(repoPath);
+  const projectFiles = fs.readdirSync(repoPath);
   let handler = 'index.handler';
 
-  if (files.includes('handler.js') || files.includes('handler.ts')) {
+  if (projectFiles.includes('handler.js') || projectFiles.includes('handler.ts')) {
     handler = 'handler.handler';
-  } else if (files.includes('index.js') || files.includes('index.ts')) {
+  } else if (projectFiles.includes('index.js') || projectFiles.includes('index.ts')) {
     handler = 'index.handler';
   }
 
@@ -423,6 +443,7 @@ async function updateDeploymentStatus(
     status,
     repository: REPOSITORY,
     branch: BRANCH,
+    projectRoot: PROJECT_ROOT || undefined,
     message,
     logs,
     deployedResources,
@@ -449,6 +470,7 @@ async function addLog(sessionId: string, logMessage: string): Promise<void> {
         status: 'deploying',
         repository: REPOSITORY,
         branch: BRANCH,
+        projectRoot: PROJECT_ROOT || undefined,
         logs: [logMessage],
       },
     })
