@@ -1,0 +1,41 @@
+# CDK - ignore compiled JS files but keep example files
+*.js
+!jest.config.js
+!examples/**/*.js
+*.d.ts
+node_modules
+cdk.out
+.cdk.staging
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+*.egg-info/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Environment
+.env
+.env.local
+
+# Build
+dist/
+build/
+*.zip

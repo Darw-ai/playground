@@ -1,0 +1,10 @@
+{
+  "name": "example-sam-lambda",
+  "version": "1.0.0",
+  "description": "Example SAM Lambda function for testing GitHub Lambda Deployer",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"No tests yet\""
+  },
+  "dependencies": {}
+}
