@@ -17,6 +17,8 @@ const ECS_SUBNETS = process.env.ECS_SUBNETS!;
 const ECS_SECURITY_GROUP = process.env.ECS_SECURITY_GROUP!;
 const FIXER_TASK_DEFINITION_ARN = process.env.FIXER_TASK_DEFINITION_ARN!;
 const FIXER_CONTAINER_NAME = process.env.FIXER_CONTAINER_NAME!;
+const WEBAPP_ENHANCER_TASK_DEFINITION_ARN = process.env.WEBAPP_ENHANCER_TASK_DEFINITION_ARN!;
+const WEBAPP_ENHANCER_CONTAINER_NAME = process.env.WEBAPP_ENHANCER_CONTAINER_NAME!;
 
 interface DeployRequest {
   repository: string;
@@ -30,6 +32,12 @@ interface FixRequest {
   customRootFolder?: string;
   stackDetails?: Record<string, any>;
   fixInstructions: string;
+}
+
+interface EnhanceRequest {
+  repository: string;
+  branch: string;
+  customRootFolder?: string;
 }
 
 interface DeploymentRecord {
@@ -67,6 +75,11 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // POST /fix - initiate fix
     if (path === '/fix' && method === 'POST') {
       return await handleFix(event);
+    }
+
+    // POST /enhance - initiate webapp enhancement
+    if (path === '/enhance' && method === 'POST') {
+      return await handleEnhance(event);
     }
 
     // GET /status/{sessionId} - get deployment status
@@ -501,6 +514,178 @@ async function handleGetStatus(sessionId: string): Promise<APIGatewayProxyResult
       deployedResources: latestRecord.deployedResources,
       error: latestRecord.error,
       lastUpdated: new Date(latestRecord.timestamp).toISOString(),
+    }),
+  };
+}
+
+async function handleEnhance(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
+  const headers = {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+  };
+
+  if (!event.body) {
+    return {
+      statusCode: 400,
+      headers,
+      body: JSON.stringify({ error: 'Request body is required' }),
+    };
+  }
+
+  const request: EnhanceRequest = JSON.parse(event.body);
+
+  // Validate request
+  if (!request.repository || !request.branch) {
+    return {
+      statusCode: 400,
+      headers,
+      body: JSON.stringify({
+        error: 'Repository and branch are required',
+        example: {
+          repository: 'https://github.com/username/webapp-repo',
+          branch: 'main',
+          customRootFolder: 'optional/path/to/webapp',
+        },
+      }),
+    };
+  }
+
+  // Validate repository URL format
+  const githubUrlPattern = /^https?:\/\/(www\.)?github\.com\/[\w-]+\/[\w-]+/;
+  if (!githubUrlPattern.test(request.repository)) {
+    return {
+      statusCode: 400,
+      headers,
+      body: JSON.stringify({
+        error: 'Invalid GitHub repository URL',
+        example: 'https://github.com/username/repo',
+      }),
+    };
+  }
+
+  // Validate customRootFolder if provided
+  if (request.customRootFolder) {
+    // Remove leading/trailing slashes
+    request.customRootFolder = request.customRootFolder.replace(/^\/+|\/+$/g, '');
+
+    // Validate path format (no .. or absolute paths)
+    if (request.customRootFolder.includes('..') || path.isAbsolute(request.customRootFolder)) {
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({
+          error: 'Invalid customRootFolder: must be a relative path without ".."',
+          example: 'webapp/frontend',
+        }),
+      };
+    }
+
+    // Validate characters (alphanumeric, dash, underscore, slash)
+    const pathPattern = /^[a-zA-Z0-9_\-\/]+$/;
+    if (!pathPattern.test(request.customRootFolder)) {
+      return {
+        statusCode: 400,
+        headers,
+        body: JSON.stringify({
+          error: 'Invalid customRootFolder: only alphanumeric, dash, underscore, and slash allowed',
+          example: 'webapp/frontend',
+        }),
+      };
+    }
+  }
+
+  // Generate session ID with enhancer prefix
+  const sessionId = `enhancer-${uuidv4()}`;
+  const timestamp = Date.now();
+
+  // Create enhancer record
+  const enhancerRecord = {
+    sessionId,
+    timestamp,
+    status: 'pending',
+    repository: request.repository,
+    branch: request.branch,
+    customRootFolder: request.customRootFolder,
+    message: 'Webapp enhancement queued',
+    logs: ['Webapp enhancement process initiated'],
+  };
+
+  // Save to DynamoDB
+  await docClient.send(
+    new PutCommand({
+      TableName: DEPLOYMENTS_TABLE,
+      Item: enhancerRecord,
+    })
+  );
+
+  // Run ECS Fargate task asynchronously
+  try {
+    const runTaskResponse = await ecsClient.send(
+      new RunTaskCommand({
+        cluster: ECS_CLUSTER_ARN,
+        taskDefinition: WEBAPP_ENHANCER_TASK_DEFINITION_ARN,
+        launchType: 'FARGATE',
+        networkConfiguration: {
+          awsvpcConfiguration: {
+            subnets: ECS_SUBNETS.split(','),
+            securityGroups: [ECS_SECURITY_GROUP],
+            assignPublicIp: 'ENABLED',
+          },
+        },
+        overrides: {
+          containerOverrides: [
+            {
+              name: WEBAPP_ENHANCER_CONTAINER_NAME,
+              environment: [
+                { name: 'SESSION_ID', value: sessionId },
+                { name: 'REPOSITORY', value: request.repository },
+                { name: 'BRANCH', value: request.branch },
+                { name: 'CUSTOM_ROOT_FOLDER', value: request.customRootFolder || '' },
+              ],
+            },
+          ],
+        },
+      })
+    );
+
+    console.log(`Webapp enhancer task started for session: ${sessionId}`, runTaskResponse.tasks?.[0]?.taskArn);
+  } catch (error) {
+    console.error('Error starting webapp enhancer task:', error);
+
+    // Update status to failed
+    await docClient.send(
+      new PutCommand({
+        TableName: DEPLOYMENTS_TABLE,
+        Item: {
+          ...enhancerRecord,
+          status: 'failed',
+          error: error instanceof Error ? error.message : 'Unknown error',
+          timestamp: Date.now(),
+        },
+      })
+    );
+
+    return {
+      statusCode: 500,
+      headers,
+      body: JSON.stringify({
+        sessionId,
+        status: 'failed',
+        error: 'Failed to start webapp enhancement process',
+      }),
+    };
+  }
+
+  return {
+    statusCode: 202,
+    headers,
+    body: JSON.stringify({
+      sessionId,
+      status: 'pending',
+      message: 'Enhancement initiated successfully',
+      repository: request.repository,
+      branch: request.branch,
+      customRootFolder: request.customRootFolder,
     }),
   };
 }
