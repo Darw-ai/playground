@@ -180,6 +180,33 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
       allowAllOutbound: true,
     });
 
+    // ECS Task Definition for fixer
+    const fixerTaskDefinition = new ecs.FargateTaskDefinition(this, 'FixerTaskDef', {
+      memoryLimitMiB: 2048,
+      cpu: 1024,
+      executionRole: taskExecutionRole,
+      taskRole: taskRole,
+    });
+
+    // Add container to fixer task definition
+    const fixerContainer = fixerTaskDefinition.addContainer('FixerContainer', {
+      image: ecs.ContainerImage.fromAsset(path.join(__dirname, '../../fixer-container')),
+      logging: ecs.LogDrivers.awsLogs({
+        streamPrefix: 'fixer',
+        logRetention: logs.RetentionDays.ONE_WEEK,
+      }),
+      environment: {
+        DEPLOYMENTS_TABLE: deploymentsTable.tableName,
+        AWS_ACCOUNT_ID: cdk.Stack.of(this).account,
+        AWS_REGION: cdk.Stack.of(this).region,
+      },
+      secrets: {
+        // ANTHROPIC_API_KEY should be stored in AWS Secrets Manager
+        // For now, it can be passed as an environment variable during deployment
+        // In production, use: ecs.Secret.fromSecretsManager(secret)
+      },
+    });
+
     // API Handler Lambda
     const apiHandlerLambda = new lambda.Function(this, 'ApiHandlerLambda', {
       runtime: lambda.Runtime.NODEJS_20_X,
@@ -194,6 +221,8 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
         ECS_CONTAINER_NAME: container.containerName,
         ECS_SUBNETS: vpc.privateSubnets.map((subnet) => subnet.subnetId).join(','),
         ECS_SECURITY_GROUP: deployerSecurityGroup.securityGroupId,
+        FIXER_TASK_DEFINITION_ARN: fixerTaskDefinition.taskDefinitionArn,
+        FIXER_CONTAINER_NAME: fixerContainer.containerName,
       },
       logRetention: logs.RetentionDays.ONE_WEEK,
     });
@@ -220,7 +249,7 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ['ecs:RunTask'],
-        resources: [taskDefinition.taskDefinitionArn],
+        resources: [taskDefinition.taskDefinitionArn, fixerTaskDefinition.taskDefinitionArn],
       })
     );
 
@@ -260,6 +289,12 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
     // POST /deploy endpoint
     const deployResource = api.root.addResource('deploy');
     deployResource.addMethod('POST', apiHandlerIntegration, {
+      apiKeyRequired: false, // Set to true and add API key for production
+    });
+
+    // POST /fix endpoint
+    const fixResource = api.root.addResource('fix');
+    fixResource.addMethod('POST', apiHandlerIntegration, {
       apiKeyRequired: false, // Set to true and add API key for production
     });
 
@@ -310,6 +345,11 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'TaskDefinitionArn', {
       value: taskDefinition.taskDefinitionArn,
       description: 'ECS Task Definition ARN',
+    });
+
+    new cdk.CfnOutput(this, 'FixerTaskDefinitionArn', {
+      value: fixerTaskDefinition.taskDefinitionArn,
+      description: 'Fixer ECS Task Definition ARN',
     });
   }
 }
