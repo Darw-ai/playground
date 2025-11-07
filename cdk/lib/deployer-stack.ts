@@ -198,6 +198,20 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
       logRetention: logs.RetentionDays.ONE_WEEK,
     });
 
+    // Status Analyzer Lambda
+    const statusAnalyzerLambda = new lambda.Function(this, 'StatusAnalyzerLambda', {
+      runtime: lambda.Runtime.NODEJS_20_X,
+      handler: 'index.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '../../lambdas/status-analyzer')),
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 512,
+      environment: {
+        DEPLOYMENTS_TABLE: deploymentsTable.tableName,
+      },
+      logRetention: logs.RetentionDays.ONE_WEEK,
+      description: 'Analyzes deployment outputs and generates fix instructions',
+    });
+
     // Grant API handler permissions
     deploymentsTable.grantReadWriteData(apiHandlerLambda);
 
@@ -218,6 +232,9 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
         resources: [taskExecutionRole.roleArn, taskRole.roleArn],
       })
     );
+
+    // Grant status analyzer read permissions to DynamoDB
+    deploymentsTable.grantReadData(statusAnalyzerLambda);
 
     // API Gateway
     const api = new apigateway.RestApi(this, 'DeployerApi', {
@@ -254,6 +271,19 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
     // GET /deployments endpoint (list all deployments)
     const deploymentsResource = api.root.addResource('deployments');
     deploymentsResource.addMethod('GET', apiHandlerIntegration);
+
+    // Status Analyzer Integration
+    const analyzerIntegration = new apigateway.LambdaIntegration(statusAnalyzerLambda);
+
+    // POST /analyze endpoint (analyze deployment output)
+    const analyzeResource = api.root.addResource('analyze');
+    analyzeResource.addMethod('POST', analyzerIntegration, {
+      apiKeyRequired: false,
+    });
+
+    // GET /analyze/{sessionId} endpoint (get analysis for session)
+    const analyzeSessionResource = analyzeResource.addResource('{sessionId}');
+    analyzeSessionResource.addMethod('GET', analyzerIntegration);
 
     // Outputs
     new cdk.CfnOutput(this, 'ApiEndpoint', {

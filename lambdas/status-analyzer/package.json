@@ -1,0 +1,19 @@
+{
+  "name": "status-analyzer",
+  "version": "1.0.0",
+  "description": "Status analyzer for deployment outputs - generates fix instructions",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w"
+  },
+  "dependencies": {
+    "@aws-sdk/client-dynamodb": "^3.600.0",
+    "@aws-sdk/lib-dynamodb": "^3.600.0"
+  },
+  "devDependencies": {
+    "@types/aws-lambda": "^8.10.140",
+    "@types/node": "^20.14.9",
+    "typescript": "^5.5.3"
+  }
+}
