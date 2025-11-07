@@ -15,6 +15,7 @@ This application provides an API that:
 
 - **API Gateway**: REST API endpoint for deployment requests
 - **API Handler Lambda**: Validates requests, generates session IDs, triggers deployments
+- **Status Analyzer Lambda**: Analyzes deployment outputs and generates fix instructions
 - **Deployer (ECS Fargate)**: Containerized deployer that clones repos, parses IaC, and deploys to AWS
 - **DynamoDB**: Stores deployment sessions and logs
 - **S3 Bucket**: Temporary storage for cloned repositories and deployment artifacts
@@ -50,10 +51,15 @@ This application provides an API that:
 │   ├── package.json
 │   └── tsconfig.json
 ├── lambdas/                      # Lambda function code
-│   └── api-handler/             # Handles API requests
+│   ├── api-handler/             # Handles API requests
+│   │   ├── index.ts
+│   │   ├── package.json
+│   │   └── tsconfig.json
+│   └── status-analyzer/         # Analyzes deployment outputs
 │       ├── index.ts
 │       ├── package.json
-│       └── tsconfig.json
+│       ├── tsconfig.json
+│       └── README.md
 ├── deployer-container/           # ECS Fargate deployer
 │   ├── Dockerfile
 │   ├── index.ts
@@ -139,6 +145,46 @@ Response:
   }
 }
 ```
+
+### Analyze deployment and get fix instructions
+
+```bash
+curl https://<API_ID>.execute-api.<REGION>.amazonaws.com/prod/analyze/<SESSION_ID>
+```
+
+Response:
+```json
+{
+  "sessionId": "uuid-here",
+  "status": "failed",
+  "repository": "https://github.com/username/repo-name",
+  "branch": "main",
+  "analysisTimestamp": "2024-01-15T10:30:00Z",
+  "deploymentDuration": 45.2,
+  "rootCause": "IAM permission denied",
+  "summary": "Deployment failed after 45.2 seconds. Found 2 error(s)...",
+  "errors": [
+    {
+      "type": "IAM_PERMISSION",
+      "severity": "critical",
+      "message": "IAM permission denied",
+      "relatedLogs": ["AccessDenied: User not authorized..."]
+    }
+  ],
+  "fixInstructions": [
+    {
+      "step": 1,
+      "category": "IAM Permissions",
+      "action": "Grant required IAM permissions",
+      "details": "The deployment failed due to insufficient IAM permissions...",
+      "codeExample": "{\n  \"Version\": \"2012-10-17\",\n  ...\n}",
+      "documentation": "https://docs.aws.amazon.com/IAM/..."
+    }
+  ]
+}
+```
+
+For more details on the Status Analyzer, see [lambdas/status-analyzer/README.md](lambdas/status-analyzer/README.md).
 
 ## Repository Requirements
 
