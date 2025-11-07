@@ -1,0 +1,30 @@
+{
+  "name": "webapp-generator",
+  "version": "1.0.0",
+  "description": "Lambda function to generate simple web applications from detailed descriptions",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "webapp",
+    "generator",
+    "lambda",
+    "backend",
+    "frontend"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@aws-sdk/client-s3": "^3.400.0",
+    "archiver": "^6.0.1"
+  },
+  "devDependencies": {
+    "@types/archiver": "^6.0.2",
+    "@types/aws-lambda": "^8.10.119",
+    "@types/node": "^20.4.0",
+    "typescript": "^5.1.6"
+  }
+}

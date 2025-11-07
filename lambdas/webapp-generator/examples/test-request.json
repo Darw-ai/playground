@@ -1,0 +1,8 @@
+{
+  "httpMethod": "POST",
+  "path": "/generate",
+  "headers": {
+    "Content-Type": "application/json"
+  },
+  "body": "{\"description\":\"I want to build a task management app called TaskMaster. Users can create, view, edit, and delete tasks. Each task should have a title, description, priority level (low, medium, high), status (todo, in-progress, done), due date, and assigned to field. The app should have a modern colorful interface.\",\"projectName\":\"taskmaster\",\"style\":\"modern\"}"
+}

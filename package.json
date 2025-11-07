@@ -4,8 +4,8 @@
   "description": "AWS infrastructure to deploy Lambda functions from GitHub repositories",
   "private": true,
   "scripts": {
-    "install:all": "cd cdk && npm install && cd ../lambdas/api-handler && npm install && cd ../deployer-container && npm install",
-    "build:all": "cd lambdas/api-handler && npm run build && cd ../deployer-container && npm run build && cd ../../cdk && npm run build",
+    "install:all": "cd cdk && npm install && cd ../lambdas/api-handler && npm install && cd ../status-analyzer && npm install && cd ../webapp-generator && npm install && cd ../../deployer-container && npm install",
+    "build:all": "cd lambdas/api-handler && npm run build && cd ../status-analyzer && npm run build && cd ../webapp-generator && npm run build && cd ../../deployer-container && npm run build && cd ../cdk && npm run build",
     "deploy": "cd cdk && npm run deploy",
     "destroy": "cd cdk && npm run destroy",
     "setup": "npm run install:all && npm run build:all"

@@ -16,6 +16,7 @@ This application provides an API that:
 - **API Gateway**: REST API endpoint for deployment requests
 - **API Handler Lambda**: Validates requests, generates session IDs, triggers deployments
 - **Status Analyzer Lambda**: Analyzes deployment outputs and generates fix instructions
+- **WebApp Generator Lambda**: Generates complete web applications from text descriptions
 - **Deployer (ECS Fargate)**: Containerized deployer that clones repos, parses IaC, and deploys to AWS
 - **DynamoDB**: Stores deployment sessions and logs
 - **S3 Bucket**: Temporary storage for cloned repositories and deployment artifacts
@@ -55,11 +56,17 @@ This application provides an API that:
 │   │   ├── index.ts
 │   │   ├── package.json
 │   │   └── tsconfig.json
-│   └── status-analyzer/         # Analyzes deployment outputs
+│   ├── status-analyzer/         # Analyzes deployment outputs
+│   │   ├── index.ts
+│   │   ├── package.json
+│   │   ├── tsconfig.json
+│   │   └── README.md
+│   └── webapp-generator/        # Generates web apps from descriptions
 │       ├── index.ts
 │       ├── package.json
 │       ├── tsconfig.json
-│       └── README.md
+│       ├── README.md
+│       └── examples/
 ├── deployer-container/           # ECS Fargate deployer
 │   ├── Dockerfile
 │   ├── index.ts
@@ -185,6 +192,24 @@ Response:
 ```
 
 For more details on the Status Analyzer, see [lambdas/status-analyzer/README.md](lambdas/status-analyzer/README.md).
+
+### Generate a Web Application
+
+The WebApp Generator creates complete full-stack applications from detailed descriptions:
+
+```bash
+curl -X POST https://<API_ID>.execute-api.<REGION>.amazonaws.com/prod/generate \
+  -H "Content-Type: application/json" \
+  -d '{
+    "description": "I want to build a task management app where users can create, view, edit, and delete tasks. Each task has a title, description, priority, and due date.",
+    "projectName": "task-manager",
+    "style": "modern"
+  }'
+```
+
+Response includes complete backend (Express.js) and frontend (HTML/CSS/JS) code ready to deploy.
+
+For more details on the WebApp Generator, see [lambdas/webapp-generator/README.md](lambdas/webapp-generator/README.md).
 
 ## Repository Requirements
 
