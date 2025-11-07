@@ -173,6 +173,27 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
       },
     });
 
+    // ECS Task Definition for test generator
+    const testTaskDefinition = new ecs.FargateTaskDefinition(this, 'TestGeneratorTaskDef', {
+      memoryLimitMiB: 2048,
+      cpu: 1024,
+      executionRole: taskExecutionRole,
+      taskRole: taskRole,
+    });
+
+    // Add container to test task definition
+    const testContainer = testTaskDefinition.addContainer('TestGeneratorContainer', {
+      image: ecs.ContainerImage.fromAsset(path.join(__dirname, '../../test-generator-container')),
+      logging: ecs.LogDrivers.awsLogs({
+        streamPrefix: 'test-generator',
+        logRetention: logs.RetentionDays.ONE_WEEK,
+      }),
+      environment: {
+        DEPLOYMENTS_TABLE: deploymentsTable.tableName,
+        AWS_REGION: cdk.Stack.of(this).region,
+      },
+    });
+
     // Security group for ECS tasks
     const deployerSecurityGroup = new ec2.SecurityGroup(this, 'DeployerSecurityGroup', {
       vpc,
@@ -192,6 +213,8 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
         ECS_CLUSTER_ARN: cluster.clusterArn,
         ECS_TASK_DEFINITION_ARN: taskDefinition.taskDefinitionArn,
         ECS_CONTAINER_NAME: container.containerName,
+        TEST_TASK_DEFINITION_ARN: testTaskDefinition.taskDefinitionArn,
+        TEST_CONTAINER_NAME: testContainer.containerName,
         ECS_SUBNETS: vpc.privateSubnets.map((subnet) => subnet.subnetId).join(','),
         ECS_SECURITY_GROUP: deployerSecurityGroup.securityGroupId,
       },
@@ -206,7 +229,7 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ['ecs:RunTask'],
-        resources: [taskDefinition.taskDefinitionArn],
+        resources: [taskDefinition.taskDefinitionArn, testTaskDefinition.taskDefinitionArn],
       })
     );
 
@@ -255,6 +278,17 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
     const deploymentsResource = api.root.addResource('deployments');
     deploymentsResource.addMethod('GET', apiHandlerIntegration);
 
+    // POST /test endpoint (initiate test generation)
+    const testResource = api.root.addResource('test');
+    testResource.addMethod('POST', apiHandlerIntegration, {
+      apiKeyRequired: false, // Set to true and add API key for production
+    });
+
+    // GET /test-status/{sessionId} endpoint
+    const testStatusResource = api.root.addResource('test-status');
+    const testSessionResource = testStatusResource.addResource('{sessionId}');
+    testSessionResource.addMethod('GET', apiHandlerIntegration);
+
     // Outputs
     new cdk.CfnOutput(this, 'ApiEndpoint', {
       value: api.url,
@@ -280,6 +314,11 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'TaskDefinitionArn', {
       value: taskDefinition.taskDefinitionArn,
       description: 'ECS Task Definition ARN',
+    });
+
+    new cdk.CfnOutput(this, 'TestTaskDefinitionArn', {
+      value: testTaskDefinition.taskDefinitionArn,
+      description: 'ECS Test Generator Task Definition ARN',
     });
   }
 }

@@ -4,22 +4,34 @@ An AWS infrastructure-as-code application that deploys Lambda functions from Git
 
 ## Architecture
 
-This application provides an API that:
+This application provides two main APIs:
+
+### 1. Lambda Deployer API
+Deploys Lambda functions from GitHub repositories:
 1. Accepts a GitHub public repository URL and branch name
 2. Generates a unique session ID for the deployment
 3. Clones the repository and deploys the Lambda infrastructure
 4. Adds a session ID suffix to deployed resources for isolation
 5. Logs all deployment progress and errors
 
+### 2. Sanity Test Generator API
+Generates and runs sanity tests on deployed stacks:
+1. Accepts a GitHub repository, branch, commit, and deployed stack details
+2. Clones the repository at the specified commit
+3. Discovers deployed resources (Lambda functions, API endpoints, S3 buckets, etc.)
+4. Automatically generates appropriate sanity tests for each resource type
+5. Executes the tests and reports results
+
 ### Components
 
-- **API Gateway**: REST API endpoint for deployment requests
-- **API Handler Lambda**: Validates requests, generates session IDs, triggers deployments
+- **API Gateway**: REST API endpoints for deployment and testing requests
+- **API Handler Lambda**: Validates requests, generates session IDs, triggers deployments and tests
 - **Deployer (ECS Fargate)**: Containerized deployer that clones repos, parses IaC, and deploys to AWS
-- **DynamoDB**: Stores deployment sessions and logs
+- **Test Generator (ECS Fargate)**: Containerized test generator that clones repos, discovers resources, and runs sanity tests
+- **DynamoDB**: Stores deployment sessions, test sessions, and logs
 - **S3 Bucket**: Temporary storage for cloned repositories and deployment artifacts
 - **VPC**: Networking for ECS Fargate tasks
-- **ECS Cluster**: Manages Fargate tasks
+- **ECS Cluster**: Manages Fargate tasks for both deployment and testing
 - **CloudWatch Logs**: Centralized logging
 
 **Why Fargate?**
@@ -55,6 +67,11 @@ This application provides an API that:
 │       ├── package.json
 │       └── tsconfig.json
 ├── deployer-container/           # ECS Fargate deployer
+│   ├── Dockerfile
+│   ├── index.ts
+│   ├── package.json
+│   └── tsconfig.json
+├── test-generator-container/     # ECS Fargate test generator
 │   ├── Dockerfile
 │   ├── index.ts
 │   ├── package.json
@@ -137,6 +154,72 @@ Response:
     "functionName": "my-function-uuid",
     "functionArn": "arn:aws:lambda:..."
   }
+}
+```
+
+### Generate and run sanity tests
+
+```bash
+curl -X POST https://<API_ID>.execute-api.<REGION>.amazonaws.com/prod/test \
+  -H "Content-Type: application/json" \
+  -d '{
+    "repository": "https://github.com/username/repo-name",
+    "branch": "main",
+    "commit": "abc123def456",
+    "stackName": "my-deployed-stack"
+  }'
+```
+
+Or test a specific Lambda function:
+
+```bash
+curl -X POST https://<API_ID>.execute-api.<REGION>.amazonaws.com/prod/test \
+  -H "Content-Type: application/json" \
+  -d '{
+    "repository": "https://github.com/username/repo-name",
+    "branch": "main",
+    "functionName": "my-lambda-function"
+  }'
+```
+
+Response:
+```json
+{
+  "sessionId": "test-uuid-here",
+  "status": "pending",
+  "message": "Test generation initiated successfully"
+}
+```
+
+### Check test status and results
+
+```bash
+curl https://<API_ID>.execute-api.<REGION>.amazonaws.com/prod/test-status/<TEST_SESSION_ID>
+```
+
+Response:
+```json
+{
+  "sessionId": "test-uuid-here",
+  "status": "completed",
+  "repository": "https://github.com/username/repo-name",
+  "branch": "main",
+  "commit": "abc123def456",
+  "testResults": [
+    {
+      "testName": "Lambda Function: MyFunction",
+      "status": "pass",
+      "message": "Function invoked successfully",
+      "duration": 1234
+    },
+    {
+      "testName": "API Endpoint: MyApi",
+      "status": "pass",
+      "message": "Endpoint responded with status 200",
+      "duration": 567
+    }
+  ],
+  "logs": ["Starting test generation...", "Found 2 resources to test..."]
 }
 ```
 

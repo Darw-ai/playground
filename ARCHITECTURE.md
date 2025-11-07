@@ -2,7 +2,9 @@
 
 ## Overview
 
-The GitHub Lambda Deployer is a serverless API that automates the deployment of Lambda functions from GitHub repositories.
+The GitHub Lambda Deployer is a serverless application that provides two main functionalities:
+1. **Automated Deployment**: Deploys Lambda functions from GitHub repositories
+2. **Sanity Testing**: Generates and runs sanity tests on deployed stacks
 
 ## Architecture Diagram
 
@@ -69,23 +71,25 @@ The GitHub Lambda Deployer is a serverless API that automates the deployment of 
   - `POST /deploy` - Initiate deployment
   - `GET /status/{sessionId}` - Check deployment status
   - `GET /deployments` - List all deployments
+  - `POST /test` - Initiate sanity test generation
+  - `GET /test-status/{sessionId}` - Check test status and results
 - **Security**: CORS enabled, optionally API keys
 
 ### 2. API Handler Lambda
 - **Runtime**: Node.js 20.x
-- **Purpose**: Handle API requests and coordinate deployments
+- **Purpose**: Handle API requests and coordinate deployments and tests
 - **Responsibilities**:
   - Validate repository URLs
   - Generate unique session IDs
-  - Invoke deployer Lambda asynchronously
-  - Query deployment status from DynamoDB
-  - Return deployment information
+  - Invoke deployer and test generator ECS tasks asynchronously
+  - Query deployment and test status from DynamoDB
+  - Return deployment and test information
 
-### 3. Deployer Lambda
-- **Runtime**: Node.js 20.x
-- **Memory**: 1024 MB
-- **Timeout**: 15 minutes
-- **Ephemeral Storage**: 2 GB
+### 3. Deployer (ECS Fargate)
+- **Runtime**: Node.js 20.x (containerized)
+- **Memory**: 2048 MB
+- **CPU**: 1024 (1 vCPU)
+- **No timeout limit**: Runs as long as needed
 - **Purpose**: Clone repos and deploy infrastructure
 - **Responsibilities**:
   - Clone GitHub repository using simple-git
@@ -96,16 +100,37 @@ The GitHub Lambda Deployer is a serverless API that automates the deployment of 
   - Log all operations to DynamoDB
   - Clean up temporary files
 
-### 4. DynamoDB Table
-- **Purpose**: Store deployment sessions and logs
+### 4. Test Generator (ECS Fargate)
+- **Runtime**: Node.js 20.x (containerized)
+- **Memory**: 2048 MB
+- **CPU**: 1024 (1 vCPU)
+- **No timeout limit**: Runs as long as needed
+- **Purpose**: Generate and execute sanity tests for deployed stacks
+- **Responsibilities**:
+  - Clone GitHub repository at specified commit using simple-git
+  - Discover deployed resources from CloudFormation stack or Lambda function name
+  - Generate appropriate sanity tests based on resource types:
+    - **Lambda Functions**: Test invocation with sample payload
+    - **API Gateway Endpoints**: HTTP GET/POST requests
+    - **S3 Buckets**: Check accessibility and list objects
+    - **IAM Roles**: Skip (not directly testable)
+  - Execute all generated tests
+  - Collect test results (pass/fail/skip status, duration, error messages)
+  - Log all operations and results to DynamoDB
+  - Clean up temporary files
+
+### 5. DynamoDB Table
+- **Purpose**: Store deployment and test sessions with logs
 - **Schema**:
   - Partition Key: `sessionId` (String)
   - Sort Key: `timestamp` (Number)
-  - Attributes: status, repository, branch, logs, deployedResources, error
+  - Attributes:
+    - For deployments: status, repository, branch, logs, deployedResources, error
+    - For tests: status, repository, branch, commit, stackName, functionName, logs, testResults, error
 - **GSI**: StatusIndex (status + timestamp) for querying by status
 - **Features**: Point-in-time recovery, streams enabled
 
-### 5. S3 Bucket
+### 6. S3 Bucket
 - **Purpose**: Store deployment artifacts
 - **Contents**:
   - Cloned repository code
@@ -114,25 +139,26 @@ The GitHub Lambda Deployer is a serverless API that automates the deployment of 
 - **Lifecycle**: Auto-delete after 7 days
 - **Security**: Private, encrypted, versioned
 
-### 6. IAM Roles
+### 7. IAM Roles
 - **API Handler Role**:
   - Basic Lambda execution
   - DynamoDB read/write
-  - Invoke deployer Lambda
+  - Run ECS tasks (deployer and test generator)
+  - Pass roles to ECS tasks
 
-- **Deployer Role**:
-  - Basic Lambda execution
-  - CloudFormation operations
-  - Lambda CRUD operations
+- **ECS Task Role** (shared by deployer and test generator):
+  - CloudFormation operations (for deployer and test resource discovery)
+  - Lambda operations (create, invoke, get function details)
+  - API Gateway operations (for test resource discovery)
+  - S3 operations (for deployer artifacts and test bucket checks)
   - IAM role creation (for deployed Lambdas)
-  - S3 read/write
   - DynamoDB read/write
 
 ## Deployment Flow
 
 1. **User Request**: POST to `/deploy` with repository URL and branch
 2. **Validation**: API Handler validates input and generates session ID
-3. **Async Execution**: Deployer Lambda is invoked asynchronously (returns 202 immediately)
+3. **Async Execution**: Deployer ECS task is started asynchronously (returns 202 immediately)
 4. **Clone**: Deployer clones the GitHub repository to `/tmp`
 5. **Detection**: Automatically detects IaC type (SAM, CloudFormation, simple Lambda)
 6. **Package**: Creates ZIP file of code if needed
@@ -144,6 +170,27 @@ The GitHub Lambda Deployer is a serverless API that automates the deployment of 
 10. **Logging**: All steps logged to DynamoDB with timestamps
 11. **Cleanup**: Removes temporary files from `/tmp`
 12. **Status**: User queries `/status/{sessionId}` to get results
+
+## Test Generation Flow
+
+1. **User Request**: POST to `/test` with repository URL, branch, commit, and stack/function details
+2. **Validation**: API Handler validates input and generates test session ID
+3. **Async Execution**: Test Generator ECS task is started asynchronously (returns 202 immediately)
+4. **Clone**: Test Generator clones the GitHub repository to `/tmp` at specified commit
+5. **Resource Discovery**:
+   - If stackName provided: Queries CloudFormation for stack resources and outputs
+   - If functionName provided: Queries Lambda for function details
+   - Identifies testable resources (Lambda, API Gateway, S3, etc.)
+6. **Test Generation**: Creates appropriate tests for each resource type:
+   - **Lambda**: Invoke with test payload
+   - **API Gateway**: HTTP GET request to endpoint
+   - **S3**: Check bucket accessibility
+   - **IAM**: Skip (not testable)
+7. **Test Execution**: Runs all generated tests in sequence
+8. **Result Collection**: Captures test status (pass/fail/skip), duration, and error messages
+9. **Logging**: All steps and test results logged to DynamoDB with timestamps
+10. **Cleanup**: Removes temporary files from `/tmp`
+11. **Status**: User queries `/test-status/{sessionId}` to get test results
 
 ## Supported IaC Types
 
