@@ -124,6 +124,13 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
           'lambda:UpdateAlias',
           'lambda:AddPermission',
           'lambda:RemovePermission',
+          'lambda:TagResource',
+          'lambda:UntagResource',
+          'lambda:ListTags',
+          'lambda:GetFunctionUrlConfig',
+          'lambda:CreateFunctionUrlConfig',
+          'lambda:UpdateFunctionUrlConfig',
+          'lambda:DeleteFunctionUrlConfig',
         ],
         resources: ['*'],
       })
@@ -330,7 +337,6 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'ApiEndpoint', {
       value: api.url,
       description: 'API Gateway endpoint URL',
-      exportName: 'GitHubLambdaDeployerApiEndpoint',
     });
 
     new cdk.CfnOutput(this, 'DeploymentsTableName', {

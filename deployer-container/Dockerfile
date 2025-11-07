@@ -16,6 +16,15 @@ RUN apk add --no-cache \
     ca-certificates \
     jq
 
+# Create symlinks for all Lambda-supported Python versions
+# Alpine installs python3.12, but SAM CLI looks for version-specific binaries
+# These symlinks allow SAM to build for any Lambda Python runtime (3.8, 3.9, 3.10, 3.11, 3.12, 3.13)
+RUN ln -sf /usr/bin/python3.12 /usr/bin/python3.8 && \
+    ln -sf /usr/bin/python3.12 /usr/bin/python3.9 && \
+    ln -sf /usr/bin/python3.12 /usr/bin/python3.10 && \
+    ln -sf /usr/bin/python3.12 /usr/bin/python3.11 && \
+    ln -sf /usr/bin/python3.12 /usr/bin/python3.13
+
 # Install AWS CLI and SAM CLI via pip
 RUN pip3 install --no-cache-dir --break-system-packages --upgrade pip setuptools wheel \
     && pip3 install --no-cache-dir --break-system-packages awscli aws-sam-cli
