@@ -98,6 +98,11 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
           'cloudformation:GetTemplate',
           'cloudformation:ValidateTemplate',
           'cloudformation:ListStacks',
+          // Change set permissions required for SAM template deployments
+          'cloudformation:CreateChangeSet',
+          'cloudformation:ExecuteChangeSet',
+          'cloudformation:DescribeChangeSet',
+          'cloudformation:DeleteChangeSet',
         ],
         resources: ['*'],
       })
@@ -210,7 +215,7 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
     // API Handler Lambda
     const apiHandlerLambda = new lambda.Function(this, 'ApiHandlerLambda', {
       runtime: lambda.Runtime.NODEJS_20_X,
-      handler: 'index.handler',
+      handler: 'dist/index.handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '../../lambdas/api-handler')),
       timeout: cdk.Duration.seconds(30),
       memorySize: 256,
@@ -271,9 +276,10 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
       description: 'API for deploying Lambda functions from GitHub repositories',
       deployOptions: {
         stageName: 'prod',
-        loggingLevel: apigateway.MethodLoggingLevel.INFO,
-        dataTraceEnabled: true,
-        metricsEnabled: true,
+        // Explicitly disable ALL logging to avoid CloudWatch Logs role requirement
+        loggingLevel: apigateway.MethodLoggingLevel.OFF,
+        dataTraceEnabled: false,
+        metricsEnabled: false,
       },
       defaultCorsPreflightOptions: {
         allowOrigins: apigateway.Cors.ALL_ORIGINS,

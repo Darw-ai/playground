@@ -15,6 +15,11 @@ import simpleGit from 'simple-git';
 import * as fs from 'fs';
 import * as path from 'path';
 import AdmZip from 'adm-zip';
+import * as yaml from 'js-yaml';
+import { exec } from 'child_process';
+import { promisify } from 'util';
+
+const execAsync = promisify(exec);
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
@@ -70,19 +75,24 @@ async function main() {
     let deployedResources: Record<string, any> = {};
 
     switch (iacType) {
-      case 'cloudformation':
+      case 'serverless':
+        deployedResources = await deployServerless(SESSION_ID, repoPath);
+        break;
       case 'sam':
+        deployedResources = await deploySamCli(SESSION_ID, repoPath);
+        break;
+      case 'cdk':
+        deployedResources = await deployCdk(SESSION_ID, repoPath);
+        break;
+      case 'terraform':
+        deployedResources = await deployTerraform(SESSION_ID, repoPath);
+        break;
+      case 'cloudformation':
         deployedResources = await deployCloudFormation(SESSION_ID, repoPath, iacType);
         break;
       case 'simple-lambda':
         deployedResources = await deploySimpleLambda(SESSION_ID, repoPath);
         break;
-      case 'cdk':
-        await addLog(SESSION_ID, 'CDK projects are not yet supported. Please use CloudFormation or SAM template.');
-        throw new Error('CDK deployment not yet implemented');
-      case 'terraform':
-        await addLog(SESSION_ID, 'Terraform projects are not yet supported. Please use CloudFormation or SAM template.');
-        throw new Error('Terraform deployment not yet implemented');
       default:
         throw new Error(`Unsupported IaC type: ${iacType}`);
     }
@@ -168,12 +178,182 @@ function detectIaCType(repoPath: string): string {
     return 'terraform';
   }
 
+  // Check for Serverless Framework
+  if (files.includes('serverless.yml') || files.includes('serverless.yaml')) {
+    return 'serverless';
+  }
+
   // Check for simple Lambda (index.js/ts, handler.js/ts, package.json)
   if (files.includes('package.json') && (files.includes('index.js') || files.includes('index.ts') || files.includes('handler.js') || files.includes('handler.ts'))) {
     return 'simple-lambda';
   }
 
   return 'unknown';
+}
+
+// Deploy using Serverless Framework
+async function deployServerless(sessionId: string, repoPath: string): Promise<Record<string, any>> {
+  await addLog(sessionId, 'Deploying with Serverless Framework');
+
+  // Install dependencies if package.json exists
+  if (fs.existsSync(path.join(repoPath, 'package.json'))) {
+    await executeCommand('npm install', { cwd: repoPath }, sessionId, 'Installing Node.js dependencies');
+  }
+
+  // Deploy using Serverless CLI
+  const stage = 'dev';
+  await executeCommand(
+    `serverless deploy --stage ${stage} --region ${AWS_REGION} --verbose`,
+    { cwd: repoPath },
+    sessionId,
+    'Deploying Serverless application'
+  );
+
+  // Get service info
+  const { stdout } = await executeCommand(
+    `serverless info --stage ${stage} --region ${AWS_REGION}`,
+    { cwd: repoPath },
+    sessionId,
+    'Getting service information'
+  );
+
+  // Parse outputs (basic extraction from serverless info output)
+  const serviceNameMatch = stdout.match(/service:\s+(\S+)/);
+  const stackNameMatch = stdout.match(/stack:\s+(\S+)/);
+  const endpointMatches = stdout.matchAll(/(?:GET|POST|PUT|DELETE|PATCH)\s+-\s+(https?:\/\/[^\s]+)/g);
+  const functionMatches = stdout.matchAll(/(\w+):\s+[\w-]+-${stage}-(\w+)/g);
+
+  const endpoints = Array.from(endpointMatches).map((m) => m[1]);
+  const functions = Array.from(functionMatches).map((m) => m[1]);
+
+  return {
+    service: serviceNameMatch ? serviceNameMatch[1] : 'unknown',
+    stack: stackNameMatch ? stackNameMatch[1] : 'unknown',
+    stage,
+    region: AWS_REGION,
+    endpoints,
+    functions,
+  };
+}
+
+// Deploy using SAM CLI
+async function deploySamCli(sessionId: string, repoPath: string): Promise<Record<string, any>> {
+  await addLog(sessionId, 'Deploying with AWS SAM CLI');
+
+  // Build SAM application
+  await executeCommand('sam build', { cwd: repoPath }, sessionId, 'Building SAM application');
+
+  // Deploy SAM application
+  const stackName = `sam-deploy-${sessionId.substring(0, 8)}`;
+  await executeCommand(
+    `sam deploy --stack-name ${stackName} --s3-bucket ${ARTIFACTS_BUCKET} --capabilities CAPABILITY_IAM CAPABILITY_NAMED_IAM --no-confirm-changeset --no-fail-on-empty-changeset --region ${AWS_REGION}`,
+    { cwd: repoPath },
+    sessionId,
+    'Deploying SAM stack'
+  );
+
+  // Get stack outputs using AWS CLI
+  const { stdout } = await executeCommand(
+    `aws cloudformation describe-stacks --stack-name ${stackName} --region ${AWS_REGION} --query 'Stacks[0].Outputs' --output json`,
+    { cwd: repoPath },
+    sessionId,
+    'Getting stack outputs'
+  );
+
+  const outputs = JSON.parse(stdout || '[]');
+  const outputsMap = outputs.reduce((acc: Record<string, any>, o: any) => {
+    acc[o.OutputKey] = o.OutputValue;
+    return acc;
+  }, {});
+
+  return {
+    stackName,
+    outputs: outputsMap,
+  };
+}
+
+// Deploy using AWS CDK
+async function deployCdk(sessionId: string, repoPath: string): Promise<Record<string, any>> {
+  await addLog(sessionId, 'Deploying with AWS CDK');
+
+  // Install dependencies based on project type
+  if (fs.existsSync(path.join(repoPath, 'package.json'))) {
+    await executeCommand('npm install', { cwd: repoPath }, sessionId, 'Installing Node.js dependencies');
+  } else if (fs.existsSync(path.join(repoPath, 'requirements.txt'))) {
+    await executeCommand('pip3 install -r requirements.txt', { cwd: repoPath }, sessionId, 'Installing Python dependencies');
+  }
+
+  // Bootstrap CDK (idempotent operation)
+  await executeCommand(
+    `cdk bootstrap aws://${AWS_ACCOUNT_ID}/${AWS_REGION}`,
+    { cwd: repoPath },
+    sessionId,
+    'Bootstrapping CDK'
+  );
+
+  // Deploy all stacks
+  await executeCommand(
+    `cdk deploy --all --require-approval never --outputs-file cdk-outputs.json`,
+    { cwd: repoPath },
+    sessionId,
+    'Deploying CDK stacks'
+  );
+
+  // Read outputs file
+  const outputsPath = path.join(repoPath, 'cdk-outputs.json');
+  let outputs = {};
+  if (fs.existsSync(outputsPath)) {
+    outputs = JSON.parse(fs.readFileSync(outputsPath, 'utf-8'));
+  }
+
+  return {
+    stacks: Object.keys(outputs),
+    outputs,
+  };
+}
+
+// Deploy using Terraform
+async function deployTerraform(sessionId: string, repoPath: string): Promise<Record<string, any>> {
+  await addLog(sessionId, 'Deploying with Terraform');
+
+  // Create backend configuration for S3 state storage
+  const backendConfig = `
+terraform {
+  backend "s3" {
+    bucket = "${ARTIFACTS_BUCKET}"
+    key    = "terraform-state/${sessionId}.tfstate"
+    region = "${AWS_REGION}"
+  }
+}
+`;
+  fs.writeFileSync(path.join(repoPath, 'backend.tf'), backendConfig);
+  await addLog(sessionId, 'Created Terraform S3 backend configuration');
+
+  // Initialize Terraform
+  await executeCommand('terraform init', { cwd: repoPath }, sessionId, 'Initializing Terraform');
+
+  // Validate configuration
+  await executeCommand('terraform validate', { cwd: repoPath }, sessionId, 'Validating Terraform configuration');
+
+  // Plan deployment
+  await executeCommand('terraform plan -out=tfplan', { cwd: repoPath }, sessionId, 'Planning Terraform deployment');
+
+  // Apply deployment
+  await executeCommand('terraform apply tfplan', { cwd: repoPath }, sessionId, 'Applying Terraform changes');
+
+  // Get outputs
+  const { stdout } = await executeCommand('terraform output -json', { cwd: repoPath }, sessionId, 'Getting Terraform outputs');
+
+  const outputs = JSON.parse(stdout || '{}');
+  const outputsMap = Object.entries(outputs).reduce((acc: Record<string, any>, [key, val]: [string, any]) => {
+    acc[key] = val.value;
+    return acc;
+  }, {});
+
+  return {
+    outputs: outputsMap,
+    stateFile: `s3://${ARTIFACTS_BUCKET}/terraform-state/${sessionId}.tfstate`,
+  };
 }
 
 async function deployCloudFormation(sessionId: string, repoPath: string, iacType: string): Promise<Record<string, any>> {
@@ -195,7 +375,41 @@ async function deployCloudFormation(sessionId: string, repoPath: string, iacType
     throw new Error('No CloudFormation template found');
   }
 
-  const templateBody = fs.readFileSync(templatePath, 'utf-8');
+  let templateBody: string;
+
+  // Handle SAM templates with packaging
+  if (iacType === 'sam') {
+    await addLog(sessionId, 'Detected SAM template - packaging Lambda functions...');
+
+    // Parse template and extract functions
+    const { template, functions } = await parseSamTemplate(templatePath);
+    await addLog(sessionId, `Found ${functions.length} Lambda function(s) to package`);
+
+    // Package and upload each function
+    const s3UriMap: Record<string, string> = {};
+
+    for (const func of functions) {
+      const codeDir = path.join(repoPath, func.codeUri);
+      await addLog(sessionId, `Packaging ${func.logicalId} from ${func.codeUri}...`);
+
+      try {
+        const zipBuffer = zipDirectory(codeDir, func.logicalId);
+        const s3Uri = await uploadFunctionToS3(sessionId, zipBuffer, func.logicalId);
+
+        s3UriMap[func.logicalId] = s3Uri;
+        await addLog(sessionId, `Uploaded ${func.logicalId} to ${s3Uri}`);
+      } catch (error: any) {
+        throw new Error(`Failed to package ${func.logicalId}: ${error.message}`);
+      }
+    }
+
+    // Transform template with S3 URIs
+    templateBody = transformSamTemplate(template, s3UriMap);
+    await addLog(sessionId, 'Template transformed with S3 URIs');
+  } else {
+    // Regular CloudFormation - use template as-is
+    templateBody = fs.readFileSync(templatePath, 'utf-8');
+  }
 
   // Validate template
   await addLog(sessionId, 'Validating CloudFormation template');
@@ -237,6 +451,92 @@ async function deployCloudFormation(sessionId: string, repoPath: string, iacType
   await addLog(sessionId, `Stack created successfully: ${stackName}`);
 
   return resources;
+}
+
+// Helper function to parse SAM template and extract function information
+async function parseSamTemplate(
+  templatePath: string
+): Promise<{ template: any; functions: Array<{ logicalId: string; codeUri: string }> }> {
+  const templateContent = fs.readFileSync(templatePath, 'utf-8');
+  const template = yaml.load(templateContent) as any;
+
+  const functions: Array<{ logicalId: string; codeUri: string }> = [];
+
+  if (template.Resources) {
+    for (const [logicalId, resource] of Object.entries(template.Resources)) {
+      const res = resource as any;
+      if (res.Type === 'AWS::Serverless::Function' && res.Properties?.CodeUri) {
+        const codeUri = res.Properties.CodeUri;
+        // Only process local paths (not S3 URIs)
+        if (typeof codeUri === 'string' && !codeUri.startsWith('s3://')) {
+          functions.push({ logicalId, codeUri });
+        }
+      }
+    }
+  }
+
+  return { template, functions };
+}
+
+// Helper function to zip a directory
+function zipDirectory(sourceDir: string, functionName: string): Buffer {
+  const zip = new AdmZip();
+
+  if (!fs.existsSync(sourceDir)) {
+    throw new Error(`Source directory does not exist: ${sourceDir}`);
+  }
+
+  const files = fs.readdirSync(sourceDir);
+
+  for (const file of files) {
+    const filePath = path.join(sourceDir, file);
+    const stat = fs.statSync(filePath);
+
+    // Skip .git and common non-essential directories
+    if (file === '.git' || file === '__pycache__' || file === '.pytest_cache') {
+      continue;
+    }
+
+    if (stat.isFile()) {
+      zip.addLocalFile(filePath);
+    } else if (stat.isDirectory()) {
+      zip.addLocalFolder(filePath, file);
+    }
+  }
+
+  return zip.toBuffer();
+}
+
+// Helper function to upload zip to S3
+async function uploadFunctionToS3(sessionId: string, zipBuffer: Buffer, functionLogicalId: string): Promise<string> {
+  const s3Key = `deployments/${sessionId}/functions/${functionLogicalId}.zip`;
+
+  await s3Client.send(
+    new PutObjectCommand({
+      Bucket: ARTIFACTS_BUCKET,
+      Key: s3Key,
+      Body: zipBuffer,
+    })
+  );
+
+  return `s3://${ARTIFACTS_BUCKET}/${s3Key}`;
+}
+
+// Helper function to transform SAM template with S3 URIs
+function transformSamTemplate(template: any, s3UriMap: Record<string, string>): string {
+  // Deep clone to avoid modifying original
+  const transformedTemplate = JSON.parse(JSON.stringify(template));
+
+  if (transformedTemplate.Resources) {
+    for (const [logicalId, resource] of Object.entries(transformedTemplate.Resources)) {
+      const res = resource as any;
+      if (res.Type === 'AWS::Serverless::Function' && s3UriMap[logicalId]) {
+        res.Properties.CodeUri = s3UriMap[logicalId];
+      }
+    }
+  }
+
+  return yaml.dump(transformedTemplate);
 }
 
 async function deploySimpleLambda(sessionId: string, repoPath: string): Promise<Record<string, any>> {
@@ -475,6 +775,52 @@ async function addLog(sessionId: string, logMessage: string): Promise<void> {
       },
     })
   );
+}
+
+// Helper function to execute shell commands with logging
+async function executeCommand(
+  command: string,
+  options: { cwd: string },
+  sessionId: string,
+  description: string
+): Promise<{ stdout: string; stderr: string }> {
+  await addLog(sessionId, `Executing: ${description}`);
+
+  try {
+    const result = await execAsync(command, {
+      ...options,
+      maxBuffer: 10 * 1024 * 1024, // 10MB buffer
+      env: {
+        ...process.env,
+        AWS_REGION,
+        AWS_DEFAULT_REGION: AWS_REGION,
+        HOME: '/tmp', // Some tools need a home directory
+      },
+    });
+
+    // Log stdout (limit lines to avoid overwhelming logs)
+    if (result.stdout) {
+      const lines = result.stdout.split('\n').slice(0, 100);
+      for (const line of lines) {
+        if (line.trim()) {
+          await addLog(sessionId, line.trim());
+        }
+      }
+    }
+
+    return result;
+  } catch (error: any) {
+    await addLog(sessionId, `Command failed: ${error.message}`);
+    if (error.stderr) {
+      const errorLines = error.stderr.split('\n').slice(0, 50);
+      for (const line of errorLines) {
+        if (line.trim()) {
+          await addLog(sessionId, `ERROR: ${line.trim()}`);
+        }
+      }
+    }
+    throw error;
+  }
 }
 
 // Run main function

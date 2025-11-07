@@ -6,6 +6,7 @@
 node_modules
 cdk.out
 .cdk.staging
+nul
 
 # Python
 __pycache__/
