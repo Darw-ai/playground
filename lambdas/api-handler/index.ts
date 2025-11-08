@@ -17,6 +17,9 @@ const ECS_SUBNETS = process.env.ECS_SUBNETS!;
 const ECS_SECURITY_GROUP = process.env.ECS_SECURITY_GROUP!;
 const FIXER_TASK_DEFINITION_ARN = process.env.FIXER_TASK_DEFINITION_ARN!;
 const FIXER_CONTAINER_NAME = process.env.FIXER_CONTAINER_NAME!;
+const SDLC_MANAGER_TASK_DEFINITION_ARN = process.env.SDLC_MANAGER_TASK_DEFINITION_ARN!;
+const SDLC_MANAGER_CONTAINER_NAME = process.env.SDLC_MANAGER_CONTAINER_NAME!;
+const API_BASE_URL = process.env.API_BASE_URL!;
 const SANITY_TESTER_TASK_DEFINITION_ARN = process.env.SANITY_TESTER_TASK_DEFINITION_ARN!;
 const SANITY_TESTER_CONTAINER_NAME = process.env.SANITY_TESTER_CONTAINER_NAME!;
 
@@ -32,6 +35,12 @@ interface FixRequest {
   customRootFolder?: string;
   stackDetails?: Record<string, any>;
   fixInstructions: string;
+}
+
+interface SDLCDeployRequest {
+  repository: string;
+  branch: string;
+  customRootFolder?: string;
 }
 
 interface SanityTestRequest {
@@ -78,6 +87,9 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
       return await handleFix(event);
     }
 
+    // POST /sdlc-deploy - initiate SDLC deployment workflow
+    if (path === '/sdlc-deploy' && method === 'POST') {
+      return await handleSDLCDeploy(event);
     // POST /sanity-test - initiate sanity testing
     if (path === '/sanity-test' && method === 'POST') {
       return await handleSanityTest(event);
@@ -469,6 +481,7 @@ async function handleFix(event: APIGatewayProxyEvent): Promise<APIGatewayProxyRe
   };
 }
 
+async function handleSDLCDeploy(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
 async function handleSanityTest(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   const headers = {
     'Content-Type': 'application/json',
@@ -483,6 +496,10 @@ async function handleSanityTest(event: APIGatewayProxyEvent): Promise<APIGateway
     };
   }
 
+  const request: SDLCDeployRequest = JSON.parse(event.body);
+
+  // Validate request
+  if (!request.repository || !request.branch) {
   const request: SanityTestRequest = JSON.parse(event.body);
 
   // Validate request
@@ -491,6 +508,7 @@ async function handleSanityTest(event: APIGatewayProxyEvent): Promise<APIGateway
       statusCode: 400,
       headers,
       body: JSON.stringify({
+        error: 'Repository and branch are required',
         error: 'Repository, branch, and stackDetails are required',
         example: {
           repository: 'https://github.com/username/repo',
@@ -527,6 +545,7 @@ async function handleSanityTest(event: APIGatewayProxyEvent): Promise<APIGateway
         headers,
         body: JSON.stringify({
           error: 'Invalid customRootFolder: must be a relative path without ".."',
+          example: 'functions/my-lambda',
           example: 'backend/api',
         }),
       };
@@ -540,6 +559,18 @@ async function handleSanityTest(event: APIGatewayProxyEvent): Promise<APIGateway
         headers,
         body: JSON.stringify({
           error: 'Invalid customRootFolder: only alphanumeric, dash, underscore, and slash allowed',
+          example: 'functions/my-lambda',
+        }),
+      };
+    }
+  }
+
+  // Generate session ID with sdlc prefix
+  const sessionId = `sdlc-${uuidv4()}`;
+  const timestamp = Date.now();
+
+  // Create SDLC manager record
+  const sdlcRecord = {
           example: 'backend/api',
         }),
       };
@@ -558,6 +589,8 @@ async function handleSanityTest(event: APIGatewayProxyEvent): Promise<APIGateway
     repository: request.repository,
     branch: request.branch,
     customRootFolder: request.customRootFolder,
+    message: 'SDLC deployment queued',
+    logs: ['SDLC deployment workflow initiated'],
     stackDetails: request.stackDetails,
     message: 'Sanity test queued',
     logs: ['Sanity test process initiated'],
@@ -567,6 +600,7 @@ async function handleSanityTest(event: APIGatewayProxyEvent): Promise<APIGateway
   await docClient.send(
     new PutCommand({
       TableName: DEPLOYMENTS_TABLE,
+      Item: sdlcRecord,
       Item: sanityTestRecord,
     })
   );
@@ -576,6 +610,7 @@ async function handleSanityTest(event: APIGatewayProxyEvent): Promise<APIGateway
     const runTaskResponse = await ecsClient.send(
       new RunTaskCommand({
         cluster: ECS_CLUSTER_ARN,
+        taskDefinition: SDLC_MANAGER_TASK_DEFINITION_ARN,
         taskDefinition: SANITY_TESTER_TASK_DEFINITION_ARN,
         launchType: 'FARGATE',
         networkConfiguration: {
@@ -588,12 +623,24 @@ async function handleSanityTest(event: APIGatewayProxyEvent): Promise<APIGateway
         overrides: {
           containerOverrides: [
             {
+              name: SDLC_MANAGER_CONTAINER_NAME,
               name: SANITY_TESTER_CONTAINER_NAME,
               environment: [
                 { name: 'SESSION_ID', value: sessionId },
                 { name: 'REPOSITORY', value: request.repository },
                 { name: 'BRANCH', value: request.branch },
                 { name: 'CUSTOM_ROOT_FOLDER', value: request.customRootFolder || '' },
+                { name: 'API_BASE_URL', value: API_BASE_URL },
+              ],
+            },
+          ],
+        },
+      })
+    );
+
+    console.log(`SDLC Manager task started for session: ${sessionId}`, runTaskResponse.tasks?.[0]?.taskArn);
+  } catch (error) {
+    console.error('Error starting SDLC Manager task:', error);
                 { name: 'STACK_DETAILS', value: JSON.stringify(request.stackDetails) },
               ],
             },
@@ -611,6 +658,7 @@ async function handleSanityTest(event: APIGatewayProxyEvent): Promise<APIGateway
       new PutCommand({
         TableName: DEPLOYMENTS_TABLE,
         Item: {
+          ...sdlcRecord,
           ...sanityTestRecord,
           status: 'failed',
           error: error instanceof Error ? error.message : 'Unknown error',
@@ -625,6 +673,7 @@ async function handleSanityTest(event: APIGatewayProxyEvent): Promise<APIGateway
       body: JSON.stringify({
         sessionId,
         status: 'failed',
+        error: 'Failed to start SDLC deployment workflow',
         error: 'Failed to start sanity test process',
       }),
     };
@@ -636,6 +685,7 @@ async function handleSanityTest(event: APIGatewayProxyEvent): Promise<APIGateway
     body: JSON.stringify({
       sessionId,
       status: 'pending',
+      message: 'SDLC deployment workflow initiated successfully',
       message: 'Sanity test initiated successfully',
       repository: request.repository,
       branch: request.branch,

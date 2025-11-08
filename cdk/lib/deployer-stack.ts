@@ -219,6 +219,10 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
       },
     });
 
+    // ECS Task Definition for SDLC Manager
+    const sdlcManagerTaskDefinition = new ecs.FargateTaskDefinition(this, 'SDLCManagerTaskDef', {
+      memoryLimitMiB: 1024,
+      cpu: 512,
     // ECS Task Definition for sanity tester
     const sanityTesterTaskDefinition = new ecs.FargateTaskDefinition(this, 'SanityTesterTaskDef', {
       memoryLimitMiB: 2048,
@@ -227,6 +231,11 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
       taskRole: taskRole,
     });
 
+    // Add container to SDLC Manager task definition
+    const sdlcManagerContainer = sdlcManagerTaskDefinition.addContainer('SDLCManagerContainer', {
+      image: ecs.ContainerImage.fromAsset(path.join(__dirname, '../../sdlc-manager-container')),
+      logging: ecs.LogDrivers.awsLogs({
+        streamPrefix: 'sdlc-manager',
     // Add container to sanity tester task definition
     const sanityTesterContainer = sanityTesterTaskDefinition.addContainer('SanityTesterContainer', {
       image: ecs.ContainerImage.fromAsset(path.join(__dirname, '../../sanity-tester-container')),
@@ -238,6 +247,7 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
         DEPLOYMENTS_TABLE: deploymentsTable.tableName,
         AWS_ACCOUNT_ID: cdk.Stack.of(this).account,
         AWS_REGION: cdk.Stack.of(this).region,
+        // API_BASE_URL will be set by the API handler when triggering the task
       },
       secrets: {
         // ANTHROPIC_API_KEY should be stored in AWS Secrets Manager
@@ -262,6 +272,9 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
         ECS_SECURITY_GROUP: deployerSecurityGroup.securityGroupId,
         FIXER_TASK_DEFINITION_ARN: fixerTaskDefinition.taskDefinitionArn,
         FIXER_CONTAINER_NAME: fixerContainer.containerName,
+        SDLC_MANAGER_TASK_DEFINITION_ARN: sdlcManagerTaskDefinition.taskDefinitionArn,
+        SDLC_MANAGER_CONTAINER_NAME: sdlcManagerContainer.containerName,
+        // API_BASE_URL will be set after API Gateway is created
         SANITY_TESTER_TASK_DEFINITION_ARN: sanityTesterTaskDefinition.taskDefinitionArn,
         SANITY_TESTER_CONTAINER_NAME: sanityTesterContainer.containerName,
       },
@@ -290,6 +303,7 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ['ecs:RunTask'],
+        resources: [taskDefinition.taskDefinitionArn, fixerTaskDefinition.taskDefinitionArn, sdlcManagerTaskDefinition.taskDefinitionArn],
         resources: [
           taskDefinition.taskDefinitionArn,
           fixerTaskDefinition.taskDefinitionArn,
@@ -344,6 +358,9 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
       apiKeyRequired: false, // Set to true and add API key for production
     });
 
+    // POST /sdlc-deploy endpoint
+    const sdlcDeployResource = api.root.addResource('sdlc-deploy');
+    sdlcDeployResource.addMethod('POST', apiHandlerIntegration, {
     // POST /sanity-test endpoint
     const sanityTestResource = api.root.addResource('sanity-test');
     sanityTestResource.addMethod('POST', apiHandlerIntegration, {
@@ -371,6 +388,9 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
     // GET /analyze/{sessionId} endpoint (get analysis for session)
     const analyzeSessionResource = analyzeResource.addResource('{sessionId}');
     analyzeSessionResource.addMethod('GET', analyzerIntegration);
+
+    // Update API Handler Lambda with API_BASE_URL now that API is created
+    apiHandlerLambda.addEnvironment('API_BASE_URL', api.url);
 
     // Outputs
     new cdk.CfnOutput(this, 'ApiEndpoint', {
@@ -403,6 +423,9 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
       description: 'Fixer ECS Task Definition ARN',
     });
 
+    new cdk.CfnOutput(this, 'SDLCManagerTaskDefinitionArn', {
+      value: sdlcManagerTaskDefinition.taskDefinitionArn,
+      description: 'SDLC Manager ECS Task Definition ARN',
     new cdk.CfnOutput(this, 'SanityTesterTaskDefinitionArn', {
       value: sanityTesterTaskDefinition.taskDefinitionArn,
       description: 'Sanity Tester ECS Task Definition ARN',
