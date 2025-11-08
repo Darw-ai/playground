@@ -219,6 +219,33 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
       },
     });
 
+    // ECS Task Definition for sanity tester
+    const sanityTesterTaskDefinition = new ecs.FargateTaskDefinition(this, 'SanityTesterTaskDef', {
+      memoryLimitMiB: 2048,
+      cpu: 1024,
+      executionRole: taskExecutionRole,
+      taskRole: taskRole,
+    });
+
+    // Add container to sanity tester task definition
+    const sanityTesterContainer = sanityTesterTaskDefinition.addContainer('SanityTesterContainer', {
+      image: ecs.ContainerImage.fromAsset(path.join(__dirname, '../../sanity-tester-container')),
+      logging: ecs.LogDrivers.awsLogs({
+        streamPrefix: 'sanity-tester',
+        logRetention: logs.RetentionDays.ONE_WEEK,
+      }),
+      environment: {
+        DEPLOYMENTS_TABLE: deploymentsTable.tableName,
+        AWS_ACCOUNT_ID: cdk.Stack.of(this).account,
+        AWS_REGION: cdk.Stack.of(this).region,
+      },
+      secrets: {
+        // ANTHROPIC_API_KEY should be stored in AWS Secrets Manager
+        // For now, it can be passed as an environment variable during deployment
+        // In production, use: ecs.Secret.fromSecretsManager(secret)
+      },
+    });
+
     // API Handler Lambda
     const apiHandlerLambda = new lambda.Function(this, 'ApiHandlerLambda', {
       runtime: lambda.Runtime.NODEJS_20_X,
@@ -235,6 +262,8 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
         ECS_SECURITY_GROUP: deployerSecurityGroup.securityGroupId,
         FIXER_TASK_DEFINITION_ARN: fixerTaskDefinition.taskDefinitionArn,
         FIXER_CONTAINER_NAME: fixerContainer.containerName,
+        SANITY_TESTER_TASK_DEFINITION_ARN: sanityTesterTaskDefinition.taskDefinitionArn,
+        SANITY_TESTER_CONTAINER_NAME: sanityTesterContainer.containerName,
       },
       logRetention: logs.RetentionDays.ONE_WEEK,
     });
@@ -261,7 +290,11 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ['ecs:RunTask'],
-        resources: [taskDefinition.taskDefinitionArn, fixerTaskDefinition.taskDefinitionArn],
+        resources: [
+          taskDefinition.taskDefinitionArn,
+          fixerTaskDefinition.taskDefinitionArn,
+          sanityTesterTaskDefinition.taskDefinitionArn,
+        ],
       })
     );
 
@@ -308,6 +341,12 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
     // POST /fix endpoint
     const fixResource = api.root.addResource('fix');
     fixResource.addMethod('POST', apiHandlerIntegration, {
+      apiKeyRequired: false, // Set to true and add API key for production
+    });
+
+    // POST /sanity-test endpoint
+    const sanityTestResource = api.root.addResource('sanity-test');
+    sanityTestResource.addMethod('POST', apiHandlerIntegration, {
       apiKeyRequired: false, // Set to true and add API key for production
     });
 
@@ -362,6 +401,11 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'FixerTaskDefinitionArn', {
       value: fixerTaskDefinition.taskDefinitionArn,
       description: 'Fixer ECS Task Definition ARN',
+    });
+
+    new cdk.CfnOutput(this, 'SanityTesterTaskDefinitionArn', {
+      value: sanityTesterTaskDefinition.taskDefinitionArn,
+      description: 'Sanity Tester ECS Task Definition ARN',
     });
   }
 }
