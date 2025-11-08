@@ -219,6 +219,29 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
       },
     });
 
+    // ECS Task Definition for SDLC Manager
+    const sdlcManagerTaskDefinition = new ecs.FargateTaskDefinition(this, 'SDLCManagerTaskDef', {
+      memoryLimitMiB: 1024,
+      cpu: 512,
+      executionRole: taskExecutionRole,
+      taskRole: taskRole,
+    });
+
+    // Add container to SDLC Manager task definition
+    const sdlcManagerContainer = sdlcManagerTaskDefinition.addContainer('SDLCManagerContainer', {
+      image: ecs.ContainerImage.fromAsset(path.join(__dirname, '../../sdlc-manager-container')),
+      logging: ecs.LogDrivers.awsLogs({
+        streamPrefix: 'sdlc-manager',
+        logRetention: logs.RetentionDays.ONE_WEEK,
+      }),
+      environment: {
+        DEPLOYMENTS_TABLE: deploymentsTable.tableName,
+        AWS_ACCOUNT_ID: cdk.Stack.of(this).account,
+        AWS_REGION: cdk.Stack.of(this).region,
+        // API_BASE_URL will be set by the API handler when triggering the task
+      },
+    });
+
     // API Handler Lambda
     const apiHandlerLambda = new lambda.Function(this, 'ApiHandlerLambda', {
       runtime: lambda.Runtime.NODEJS_20_X,
@@ -235,6 +258,9 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
         ECS_SECURITY_GROUP: deployerSecurityGroup.securityGroupId,
         FIXER_TASK_DEFINITION_ARN: fixerTaskDefinition.taskDefinitionArn,
         FIXER_CONTAINER_NAME: fixerContainer.containerName,
+        SDLC_MANAGER_TASK_DEFINITION_ARN: sdlcManagerTaskDefinition.taskDefinitionArn,
+        SDLC_MANAGER_CONTAINER_NAME: sdlcManagerContainer.containerName,
+        // API_BASE_URL will be set after API Gateway is created
       },
       logRetention: logs.RetentionDays.ONE_WEEK,
     });
@@ -261,7 +287,7 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ['ecs:RunTask'],
-        resources: [taskDefinition.taskDefinitionArn, fixerTaskDefinition.taskDefinitionArn],
+        resources: [taskDefinition.taskDefinitionArn, fixerTaskDefinition.taskDefinitionArn, sdlcManagerTaskDefinition.taskDefinitionArn],
       })
     );
 
@@ -311,6 +337,12 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
       apiKeyRequired: false, // Set to true and add API key for production
     });
 
+    // POST /sdlc-deploy endpoint
+    const sdlcDeployResource = api.root.addResource('sdlc-deploy');
+    sdlcDeployResource.addMethod('POST', apiHandlerIntegration, {
+      apiKeyRequired: false, // Set to true and add API key for production
+    });
+
     // GET /status/{sessionId} endpoint
     const statusResource = api.root.addResource('status');
     const sessionResource = statusResource.addResource('{sessionId}');
@@ -332,6 +364,9 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
     // GET /analyze/{sessionId} endpoint (get analysis for session)
     const analyzeSessionResource = analyzeResource.addResource('{sessionId}');
     analyzeSessionResource.addMethod('GET', analyzerIntegration);
+
+    // Update API Handler Lambda with API_BASE_URL now that API is created
+    apiHandlerLambda.addEnvironment('API_BASE_URL', api.url);
 
     // Outputs
     new cdk.CfnOutput(this, 'ApiEndpoint', {
@@ -362,6 +397,11 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'FixerTaskDefinitionArn', {
       value: fixerTaskDefinition.taskDefinitionArn,
       description: 'Fixer ECS Task Definition ARN',
+    });
+
+    new cdk.CfnOutput(this, 'SDLCManagerTaskDefinitionArn', {
+      value: sdlcManagerTaskDefinition.taskDefinitionArn,
+      description: 'SDLC Manager ECS Task Definition ARN',
     });
   }
 }
