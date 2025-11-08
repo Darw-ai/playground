@@ -1,0 +1,27 @@
+{
+  "name": "sanity-tester-container",
+  "version": "1.0.0",
+  "description": "Sanity tester module for automated API testing",
+  "main": "index.js",
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc -w",
+    "start": "node index.js"
+  },
+  "keywords": ["sanity", "testing", "api"],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.32.0",
+    "@aws-sdk/client-dynamodb": "^3.600.0",
+    "@aws-sdk/lib-dynamodb": "^3.600.0",
+    "axios": "^1.7.9",
+    "simple-git": "^3.25.0",
+    "uuid": "^10.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.9",
+    "@types/uuid": "^10.0.0",
+    "typescript": "^5.5.3"
+  }
+}
