@@ -1,27 +1,22 @@
 import { APIGatewayProxyEvent, APIGatewayProxyResult } from 'aws-lambda';
 import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
 import { DynamoDBDocumentClient, PutCommand, QueryCommand, ScanCommand } from '@aws-sdk/lib-dynamodb';
-import { ECSClient, RunTaskCommand } from '@aws-sdk/client-ecs';
+import { SQSClient, SendMessageCommand } from '@aws-sdk/client-sqs';
+import { SFNClient, StartExecutionCommand } from '@aws-sdk/client-sfn';
 import { v4 as uuidv4 } from 'uuid';
 import * as path from 'path';
 
 const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
-const ecsClient = new ECSClient({});
+const sqsClient = new SQSClient({});
+const sfnClient = new SFNClient({});
 
 const DEPLOYMENTS_TABLE = process.env.DEPLOYMENTS_TABLE!;
-const ECS_CLUSTER_ARN = process.env.ECS_CLUSTER_ARN!;
-const ECS_TASK_DEFINITION_ARN = process.env.ECS_TASK_DEFINITION_ARN!;
-const ECS_CONTAINER_NAME = process.env.ECS_CONTAINER_NAME!;
-const ECS_SUBNETS = process.env.ECS_SUBNETS!;
-const ECS_SECURITY_GROUP = process.env.ECS_SECURITY_GROUP!;
-const FIXER_TASK_DEFINITION_ARN = process.env.FIXER_TASK_DEFINITION_ARN!;
-const FIXER_CONTAINER_NAME = process.env.FIXER_CONTAINER_NAME!;
-const SDLC_MANAGER_TASK_DEFINITION_ARN = process.env.SDLC_MANAGER_TASK_DEFINITION_ARN!;
-const SDLC_MANAGER_CONTAINER_NAME = process.env.SDLC_MANAGER_CONTAINER_NAME!;
+const CLONE_DETECT_QUEUE_URL = process.env.CLONE_DETECT_QUEUE_URL!;
+const FIXER_QUEUE_URL = process.env.FIXER_QUEUE_URL!;
+const SANITY_TESTER_QUEUE_URL = process.env.SANITY_TESTER_QUEUE_URL!;
+const SDLC_STATE_MACHINE_ARN = process.env.SDLC_STATE_MACHINE_ARN!;
 const API_BASE_URL = process.env.API_BASE_URL!;
-const SANITY_TESTER_TASK_DEFINITION_ARN = process.env.SANITY_TESTER_TASK_DEFINITION_ARN!;
-const SANITY_TESTER_CONTAINER_NAME = process.env.SANITY_TESTER_CONTAINER_NAME!;
 
 interface DeployRequest {
   repository: string;
@@ -90,6 +85,8 @@ export const handler = async (event: APIGatewayProxyEvent): Promise<APIGatewayPr
     // POST /sdlc-deploy - initiate SDLC deployment workflow
     if (path === '/sdlc-deploy' && method === 'POST') {
       return await handleSDLCDeploy(event);
+    }
+
     // POST /sanity-test - initiate sanity testing
     if (path === '/sanity-test' && method === 'POST') {
       return await handleSanityTest(event);
@@ -177,10 +174,8 @@ async function handleDeploy(event: APIGatewayProxyEvent): Promise<APIGatewayProx
 
   // Validate projectRoot if provided
   if (request.projectRoot) {
-    // Remove leading/trailing slashes
     request.projectRoot = request.projectRoot.replace(/^\/+|\/+$/g, '');
 
-    // Validate path format (no .. or absolute paths)
     if (request.projectRoot.includes('..') || path.isAbsolute(request.projectRoot)) {
       return {
         statusCode: 400,
@@ -192,7 +187,6 @@ async function handleDeploy(event: APIGatewayProxyEvent): Promise<APIGatewayProx
       };
     }
 
-    // Validate characters (alphanumeric, dash, underscore, slash)
     const pathPattern = /^[a-zA-Z0-9_\-\/]+$/;
     if (!pathPattern.test(request.projectRoot)) {
       return {
@@ -230,41 +224,24 @@ async function handleDeploy(event: APIGatewayProxyEvent): Promise<APIGatewayProx
     })
   );
 
-  // Run ECS Fargate task asynchronously
+  // Send message to SQS queue
   try {
-    const runTaskResponse = await ecsClient.send(
-      new RunTaskCommand({
-        cluster: ECS_CLUSTER_ARN,
-        taskDefinition: ECS_TASK_DEFINITION_ARN,
-        launchType: 'FARGATE',
-        networkConfiguration: {
-          awsvpcConfiguration: {
-            subnets: ECS_SUBNETS.split(','),
-            securityGroups: [ECS_SECURITY_GROUP],
-            assignPublicIp: 'ENABLED',
-          },
-        },
-        overrides: {
-          containerOverrides: [
-            {
-              name: ECS_CONTAINER_NAME,
-              environment: [
-                { name: 'SESSION_ID', value: sessionId },
-                { name: 'REPOSITORY', value: request.repository },
-                { name: 'BRANCH', value: request.branch },
-                { name: 'PROJECT_ROOT', value: request.projectRoot || '' },
-              ],
-            },
-          ],
-        },
+    await sqsClient.send(
+      new SendMessageCommand({
+        QueueUrl: CLONE_DETECT_QUEUE_URL,
+        MessageBody: JSON.stringify({
+          sessionId,
+          repository: request.repository,
+          branch: request.branch,
+          projectRoot: request.projectRoot,
+        }),
       })
     );
 
-    console.log(`ECS task started for session: ${sessionId}`, runTaskResponse.tasks?.[0]?.taskArn);
+    console.log(`Deploy job queued for session: ${sessionId}`);
   } catch (error) {
-    console.error('Error starting ECS task:', error);
+    console.error('Error sending message to SQS:', error);
 
-    // Update status to failed
     await docClient.send(
       new PutCommand({
         TableName: DEPLOYMENTS_TABLE,
@@ -283,7 +260,7 @@ async function handleDeploy(event: APIGatewayProxyEvent): Promise<APIGatewayProx
       body: JSON.stringify({
         sessionId,
         status: 'failed',
-        error: 'Failed to start deployment',
+        error: 'Failed to queue deployment',
       }),
     };
   }
@@ -294,7 +271,7 @@ async function handleDeploy(event: APIGatewayProxyEvent): Promise<APIGatewayProx
     body: JSON.stringify({
       sessionId,
       status: 'pending',
-      message: 'Deployment initiated successfully',
+      message: 'Deployment queued successfully',
       repository: request.repository,
       branch: request.branch,
       projectRoot: request.projectRoot,
@@ -349,37 +326,6 @@ async function handleFix(event: APIGatewayProxyEvent): Promise<APIGatewayProxyRe
     };
   }
 
-  // Validate customRootFolder if provided
-  if (request.customRootFolder) {
-    // Remove leading/trailing slashes
-    request.customRootFolder = request.customRootFolder.replace(/^\/+|\/+$/g, '');
-
-    // Validate path format (no .. or absolute paths)
-    if (request.customRootFolder.includes('..') || path.isAbsolute(request.customRootFolder)) {
-      return {
-        statusCode: 400,
-        headers,
-        body: JSON.stringify({
-          error: 'Invalid customRootFolder: must be a relative path without ".."',
-          example: 'functions/my-lambda',
-        }),
-      };
-    }
-
-    // Validate characters (alphanumeric, dash, underscore, slash)
-    const pathPattern = /^[a-zA-Z0-9_\-\/]+$/;
-    if (!pathPattern.test(request.customRootFolder)) {
-      return {
-        statusCode: 400,
-        headers,
-        body: JSON.stringify({
-          error: 'Invalid customRootFolder: only alphanumeric, dash, underscore, and slash allowed',
-          example: 'functions/my-lambda',
-        }),
-      };
-    }
-  }
-
   // Generate session ID with fixer prefix
   const sessionId = `fixer-${uuidv4()}`;
   const timestamp = Date.now();
@@ -406,43 +352,26 @@ async function handleFix(event: APIGatewayProxyEvent): Promise<APIGatewayProxyRe
     })
   );
 
-  // Run ECS Fargate task asynchronously
+  // Send message to SQS queue
   try {
-    const runTaskResponse = await ecsClient.send(
-      new RunTaskCommand({
-        cluster: ECS_CLUSTER_ARN,
-        taskDefinition: FIXER_TASK_DEFINITION_ARN,
-        launchType: 'FARGATE',
-        networkConfiguration: {
-          awsvpcConfiguration: {
-            subnets: ECS_SUBNETS.split(','),
-            securityGroups: [ECS_SECURITY_GROUP],
-            assignPublicIp: 'ENABLED',
-          },
-        },
-        overrides: {
-          containerOverrides: [
-            {
-              name: FIXER_CONTAINER_NAME,
-              environment: [
-                { name: 'SESSION_ID', value: sessionId },
-                { name: 'REPOSITORY', value: request.repository },
-                { name: 'BRANCH', value: request.branch },
-                { name: 'CUSTOM_ROOT_FOLDER', value: request.customRootFolder || '' },
-                { name: 'FIX_INSTRUCTIONS', value: request.fixInstructions },
-                { name: 'STACK_DETAILS', value: request.stackDetails ? JSON.stringify(request.stackDetails) : '' },
-              ],
-            },
-          ],
-        },
+    await sqsClient.send(
+      new SendMessageCommand({
+        QueueUrl: FIXER_QUEUE_URL,
+        MessageBody: JSON.stringify({
+          sessionId,
+          repository: request.repository,
+          branch: request.branch,
+          customRootFolder: request.customRootFolder,
+          fixInstructions: request.fixInstructions,
+          stackDetails: request.stackDetails,
+        }),
       })
     );
 
-    console.log(`Fixer task started for session: ${sessionId}`, runTaskResponse.tasks?.[0]?.taskArn);
+    console.log(`Fix job queued for session: ${sessionId}`);
   } catch (error) {
-    console.error('Error starting fixer task:', error);
+    console.error('Error sending message to SQS:', error);
 
-    // Update status to failed
     await docClient.send(
       new PutCommand({
         TableName: DEPLOYMENTS_TABLE,
@@ -461,7 +390,7 @@ async function handleFix(event: APIGatewayProxyEvent): Promise<APIGatewayProxyRe
       body: JSON.stringify({
         sessionId,
         status: 'failed',
-        error: 'Failed to start fix process',
+        error: 'Failed to queue fix process',
       }),
     };
   }
@@ -472,7 +401,7 @@ async function handleFix(event: APIGatewayProxyEvent): Promise<APIGatewayProxyRe
     body: JSON.stringify({
       sessionId,
       status: 'pending',
-      message: 'Fix initiated successfully',
+      message: 'Fix queued successfully',
       repository: request.repository,
       branch: request.branch,
       customRootFolder: request.customRootFolder,
@@ -482,7 +411,6 @@ async function handleFix(event: APIGatewayProxyEvent): Promise<APIGatewayProxyRe
 }
 
 async function handleSDLCDeploy(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
-async function handleSanityTest(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
   const headers = {
     'Content-Type': 'application/json',
     'Access-Control-Allow-Origin': '*',
@@ -500,6 +428,132 @@ async function handleSanityTest(event: APIGatewayProxyEvent): Promise<APIGateway
 
   // Validate request
   if (!request.repository || !request.branch) {
+    return {
+      statusCode: 400,
+      headers,
+      body: JSON.stringify({
+        error: 'Repository and branch are required',
+        example: {
+          repository: 'https://github.com/username/repo',
+          branch: 'main',
+          customRootFolder: 'optional/path',
+        },
+      }),
+    };
+  }
+
+  // Generate session ID with sdlc prefix
+  const sessionId = `sdlc-${uuidv4()}`;
+  const timestamp = Date.now();
+
+  // Create SDLC manager record
+  const sdlcRecord = {
+    sessionId,
+    timestamp,
+    status: 'pending',
+    repository: request.repository,
+    branch: request.branch,
+    customRootFolder: request.customRootFolder,
+    message: 'SDLC deployment queued',
+    logs: ['SDLC deployment workflow initiated'],
+  };
+
+  // Save to DynamoDB
+  await docClient.send(
+    new PutCommand({
+      TableName: DEPLOYMENTS_TABLE,
+      Item: sdlcRecord,
+    })
+  );
+
+  // Start Step Functions execution
+  try {
+    const executionInput = {
+      deployJob: {
+        sessionId: `deploy-${uuidv4()}`,
+        repository: request.repository,
+        branch: request.branch,
+        projectRoot: request.customRootFolder,
+      },
+      sanityTestJob: {
+        sessionId: `sanity-${uuidv4()}`,
+        repository: request.repository,
+        branch: request.branch,
+        customRootFolder: request.customRootFolder,
+        stackDetails: {},
+      },
+      fixJob: {
+        sessionId: `fixer-${uuidv4()}`,
+        repository: request.repository,
+        branch: request.branch,
+        customRootFolder: request.customRootFolder,
+        fixInstructions: 'Fix deployment or test failures',
+      },
+    };
+
+    await sfnClient.send(
+      new StartExecutionCommand({
+        stateMachineArn: SDLC_STATE_MACHINE_ARN,
+        input: JSON.stringify(executionInput),
+        name: sessionId,
+      })
+    );
+
+    console.log(`SDLC workflow started for session: ${sessionId}`);
+  } catch (error) {
+    console.error('Error starting Step Functions execution:', error);
+
+    await docClient.send(
+      new PutCommand({
+        TableName: DEPLOYMENTS_TABLE,
+        Item: {
+          ...sdlcRecord,
+          status: 'failed',
+          error: error instanceof Error ? error.message : 'Unknown error',
+          timestamp: Date.now(),
+        },
+      })
+    );
+
+    return {
+      statusCode: 500,
+      headers,
+      body: JSON.stringify({
+        sessionId,
+        status: 'failed',
+        error: 'Failed to start SDLC workflow',
+      }),
+    };
+  }
+
+  return {
+    statusCode: 202,
+    headers,
+    body: JSON.stringify({
+      sessionId,
+      status: 'pending',
+      message: 'SDLC deployment workflow initiated successfully',
+      repository: request.repository,
+      branch: request.branch,
+      customRootFolder: request.customRootFolder,
+    }),
+  };
+}
+
+async function handleSanityTest(event: APIGatewayProxyEvent): Promise<APIGatewayProxyResult> {
+  const headers = {
+    'Content-Type': 'application/json',
+    'Access-Control-Allow-Origin': '*',
+  };
+
+  if (!event.body) {
+    return {
+      statusCode: 400,
+      headers,
+      body: JSON.stringify({ error: 'Request body is required' }),
+    };
+  }
+
   const request: SanityTestRequest = JSON.parse(event.body);
 
   // Validate request
@@ -508,7 +562,6 @@ async function handleSanityTest(event: APIGatewayProxyEvent): Promise<APIGateway
       statusCode: 400,
       headers,
       body: JSON.stringify({
-        error: 'Repository and branch are required',
         error: 'Repository, branch, and stackDetails are required',
         example: {
           repository: 'https://github.com/username/repo',
@@ -518,63 +571,6 @@ async function handleSanityTest(event: APIGatewayProxyEvent): Promise<APIGateway
         },
       }),
     };
-  }
-
-  // Validate repository URL format
-  const githubUrlPattern = /^https?:\/\/(www\.)?github\.com\/[\w-]+\/[\w-]+/;
-  if (!githubUrlPattern.test(request.repository)) {
-    return {
-      statusCode: 400,
-      headers,
-      body: JSON.stringify({
-        error: 'Invalid GitHub repository URL',
-        example: 'https://github.com/username/repo',
-      }),
-    };
-  }
-
-  // Validate customRootFolder if provided
-  if (request.customRootFolder) {
-    // Remove leading/trailing slashes
-    request.customRootFolder = request.customRootFolder.replace(/^\/+|\/+$/g, '');
-
-    // Validate path format (no .. or absolute paths)
-    if (request.customRootFolder.includes('..') || path.isAbsolute(request.customRootFolder)) {
-      return {
-        statusCode: 400,
-        headers,
-        body: JSON.stringify({
-          error: 'Invalid customRootFolder: must be a relative path without ".."',
-          example: 'functions/my-lambda',
-          example: 'backend/api',
-        }),
-      };
-    }
-
-    // Validate characters (alphanumeric, dash, underscore, slash)
-    const pathPattern = /^[a-zA-Z0-9_\-\/]+$/;
-    if (!pathPattern.test(request.customRootFolder)) {
-      return {
-        statusCode: 400,
-        headers,
-        body: JSON.stringify({
-          error: 'Invalid customRootFolder: only alphanumeric, dash, underscore, and slash allowed',
-          example: 'functions/my-lambda',
-        }),
-      };
-    }
-  }
-
-  // Generate session ID with sdlc prefix
-  const sessionId = `sdlc-${uuidv4()}`;
-  const timestamp = Date.now();
-
-  // Create SDLC manager record
-  const sdlcRecord = {
-          example: 'backend/api',
-        }),
-      };
-    }
   }
 
   // Generate session ID with sanity-test prefix
@@ -589,8 +585,6 @@ async function handleSanityTest(event: APIGatewayProxyEvent): Promise<APIGateway
     repository: request.repository,
     branch: request.branch,
     customRootFolder: request.customRootFolder,
-    message: 'SDLC deployment queued',
-    logs: ['SDLC deployment workflow initiated'],
     stackDetails: request.stackDetails,
     message: 'Sanity test queued',
     logs: ['Sanity test process initiated'],
@@ -600,65 +594,33 @@ async function handleSanityTest(event: APIGatewayProxyEvent): Promise<APIGateway
   await docClient.send(
     new PutCommand({
       TableName: DEPLOYMENTS_TABLE,
-      Item: sdlcRecord,
       Item: sanityTestRecord,
     })
   );
 
-  // Run ECS Fargate task asynchronously
+  // Send message to SQS queue
   try {
-    const runTaskResponse = await ecsClient.send(
-      new RunTaskCommand({
-        cluster: ECS_CLUSTER_ARN,
-        taskDefinition: SDLC_MANAGER_TASK_DEFINITION_ARN,
-        taskDefinition: SANITY_TESTER_TASK_DEFINITION_ARN,
-        launchType: 'FARGATE',
-        networkConfiguration: {
-          awsvpcConfiguration: {
-            subnets: ECS_SUBNETS.split(','),
-            securityGroups: [ECS_SECURITY_GROUP],
-            assignPublicIp: 'ENABLED',
-          },
-        },
-        overrides: {
-          containerOverrides: [
-            {
-              name: SDLC_MANAGER_CONTAINER_NAME,
-              name: SANITY_TESTER_CONTAINER_NAME,
-              environment: [
-                { name: 'SESSION_ID', value: sessionId },
-                { name: 'REPOSITORY', value: request.repository },
-                { name: 'BRANCH', value: request.branch },
-                { name: 'CUSTOM_ROOT_FOLDER', value: request.customRootFolder || '' },
-                { name: 'API_BASE_URL', value: API_BASE_URL },
-              ],
-            },
-          ],
-        },
+    await sqsClient.send(
+      new SendMessageCommand({
+        QueueUrl: SANITY_TESTER_QUEUE_URL,
+        MessageBody: JSON.stringify({
+          sessionId,
+          repository: request.repository,
+          branch: request.branch,
+          customRootFolder: request.customRootFolder,
+          stackDetails: request.stackDetails,
+        }),
       })
     );
 
-    console.log(`SDLC Manager task started for session: ${sessionId}`, runTaskResponse.tasks?.[0]?.taskArn);
+    console.log(`Sanity test job queued for session: ${sessionId}`);
   } catch (error) {
-    console.error('Error starting SDLC Manager task:', error);
-                { name: 'STACK_DETAILS', value: JSON.stringify(request.stackDetails) },
-              ],
-            },
-          ],
-        },
-      })
-    );
+    console.error('Error sending message to SQS:', error);
 
-    console.log(`Sanity tester task started for session: ${sessionId}`, runTaskResponse.tasks?.[0]?.taskArn);
-  } catch (error) {
-    console.error('Error starting sanity tester task:', error);
-
-    // Update status to failed
     await docClient.send(
       new PutCommand({
         TableName: DEPLOYMENTS_TABLE,
         Item: {
-          ...sdlcRecord,
           ...sanityTestRecord,
           status: 'failed',
           error: error instanceof Error ? error.message : 'Unknown error',
@@ -673,8 +635,7 @@ async function handleSanityTest(event: APIGatewayProxyEvent): Promise<APIGateway
       body: JSON.stringify({
         sessionId,
         status: 'failed',
-        error: 'Failed to start SDLC deployment workflow',
-        error: 'Failed to start sanity test process',
+        error: 'Failed to queue sanity test process',
       }),
     };
   }
@@ -685,8 +646,7 @@ async function handleSanityTest(event: APIGatewayProxyEvent): Promise<APIGateway
     body: JSON.stringify({
       sessionId,
       status: 'pending',
-      message: 'SDLC deployment workflow initiated successfully',
-      message: 'Sanity test initiated successfully',
+      message: 'Sanity test queued successfully',
       repository: request.repository,
       branch: request.branch,
       customRootFolder: request.customRootFolder,
@@ -720,7 +680,7 @@ async function handleGetStatus(sessionId: string): Promise<APIGatewayProxyResult
     };
   }
 
-  // Get the latest record (first item since we sorted descending)
+  // Get the latest record
   const latestRecord = result.Items[0] as DeploymentRecord;
 
   // Collect all logs from all records
@@ -773,7 +733,7 @@ async function handleListDeployments(event: APIGatewayProxyEvent): Promise<APIGa
       })
     );
   } else {
-    // Scan all (not recommended for large tables, but okay for demo)
+    // Scan all
     result = await docClient.send(
       new ScanCommand({
         TableName: DEPLOYMENTS_TABLE,
