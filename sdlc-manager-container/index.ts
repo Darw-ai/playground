@@ -272,7 +272,7 @@ async function pollStatusAnalyzer(deploymentSessionId: string): Promise<any> {
 async function runSanityTests(deploymentSessionId: string, deployedResources?: Record<string, any>): Promise<any> {
   try {
     // Call sanity tester module
-    const response = await axios.post(`${API_BASE_URL}/sanity`, {
+    const response = await axios.post(`${API_BASE_URL}/sanity-test`, {
       deploymentSessionId,
       deployedResources,
       repository: REPOSITORY,
@@ -285,16 +285,6 @@ async function runSanityTests(deploymentSessionId: string, deployedResources?: R
       tests: response.data.tests,
     };
   } catch (error) {
-    // If sanity endpoint doesn't exist yet, simulate success for now
-    if (axios.isAxiosError(error) && error.response?.status === 404) {
-      await addLog(SESSION_ID, 'Note: Sanity tester endpoint not yet implemented, assuming success');
-      return {
-        status: 'success',
-        message: 'Sanity tester not yet implemented - assuming success',
-        tests: [],
-      };
-    }
-
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return {
       status: 'failed',

@@ -1,4 +1,4 @@
-import Anthropic from '@anthropic-ai/sdk';
+import { BedrockRuntimeClient, ConverseCommand } from '@aws-sdk/client-bedrock-runtime';
 
 export interface FixPlan {
   summary: string;
@@ -7,12 +7,11 @@ export interface FixPlan {
 }
 
 export class AIClient {
-  private client: Anthropic;
+  private client: BedrockRuntimeClient;
+  private modelId: string = 'amazon.nova-pro-v1:0';
 
-  constructor(apiKey: string) {
-    this.client = new Anthropic({
-      apiKey: apiKey,
-    });
+  constructor() {
+    this.client = new BedrockRuntimeClient({});
   }
 
   async createFixPlan(
@@ -38,21 +37,26 @@ ${stackDetails ? `Stack Details:\n${JSON.stringify(stackDetails, null, 2)}` : ''
 
 Please create a detailed fix plan.`;
 
-    const message = await this.client.messages.create({
-      model: 'claude-sonnet-4-5-20250929',
-      max_tokens: 4096,
-      system: systemPrompt,
+    const command = new ConverseCommand({
+      modelId: this.modelId,
       messages: [
         {
           role: 'user',
-          content: userPrompt,
+          content: [{ text: userPrompt }],
         },
       ],
+      system: [{ text: systemPrompt }],
+      inferenceConfig: {
+        maxTokens: 4096,
+        temperature: 0.7,
+      },
     });
 
+    const response = await this.client.send(command);
+
     // Extract the text content from the response
-    const textContent = message.content.find((block) => block.type === 'text');
-    if (!textContent || textContent.type !== 'text') {
+    const textContent = response.output?.message?.content?.[0];
+    if (!textContent || !('text' in textContent) || !textContent.text) {
       throw new Error('No text content in AI response');
     }
 
@@ -100,21 +104,26 @@ ${stackDetails ? `Stack Details:\n${JSON.stringify(stackDetails, null, 2)}` : ''
 
 Please implement the fix by providing the complete new content for each file that needs to be modified.`;
 
-    const message = await this.client.messages.create({
-      model: 'claude-sonnet-4-5-20250929',
-      max_tokens: 8192,
-      system: systemPrompt,
+    const command = new ConverseCommand({
+      modelId: this.modelId,
       messages: [
         {
           role: 'user',
-          content: userPrompt,
+          content: [{ text: userPrompt }],
         },
       ],
+      system: [{ text: systemPrompt }],
+      inferenceConfig: {
+        maxTokens: 8192,
+        temperature: 0.7,
+      },
     });
 
+    const response = await this.client.send(command);
+
     // Extract the text content from the response
-    const textContent = message.content.find((block) => block.type === 'text');
-    if (!textContent || textContent.type !== 'text') {
+    const textContent = response.output?.message?.content?.[0];
+    if (!textContent || !('text' in textContent) || !textContent.text) {
       throw new Error('No text content in AI response');
     }
 
@@ -124,10 +133,10 @@ Please implement the fix by providing the complete new content for each file tha
       throw new Error('Could not extract JSON from AI response');
     }
 
-    const response = JSON.parse(jsonMatch[0]);
+    const result = JSON.parse(jsonMatch[0]);
     const modifiedFiles = new Map<string, string>();
 
-    for (const [filePath, content] of Object.entries(response.files)) {
+    for (const [filePath, content] of Object.entries(result.files)) {
       modifiedFiles.set(filePath, content as string);
     }
 

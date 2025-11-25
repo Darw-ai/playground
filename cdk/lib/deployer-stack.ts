@@ -156,6 +156,21 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
       })
     );
 
+    // Grant permissions for AWS Bedrock (for AI-powered features)
+    taskRole.addToPolicy(
+      new iam.PolicyStatement({
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock:InvokeModel',
+          'bedrock:InvokeModelWithResponseStream',
+        ],
+        resources: [
+          // Nova Pro model
+          `arn:aws:bedrock:${cdk.Stack.of(this).region}::foundation-model/amazon.nova-pro-v1:0`,
+        ],
+      })
+    );
+
     // Grant S3 permissions
     artifactsBucket.grantReadWrite(taskRole);
 
@@ -212,21 +227,12 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
         AWS_ACCOUNT_ID: cdk.Stack.of(this).account,
         AWS_REGION: cdk.Stack.of(this).region,
       },
-      secrets: {
-        // ANTHROPIC_API_KEY should be stored in AWS Secrets Manager
-        // For now, it can be passed as an environment variable during deployment
-        // In production, use: ecs.Secret.fromSecretsManager(secret)
-      },
     });
 
     // ECS Task Definition for SDLC Manager
     const sdlcManagerTaskDefinition = new ecs.FargateTaskDefinition(this, 'SDLCManagerTaskDef', {
       memoryLimitMiB: 1024,
       cpu: 512,
-    // ECS Task Definition for sanity tester
-    const sanityTesterTaskDefinition = new ecs.FargateTaskDefinition(this, 'SanityTesterTaskDef', {
-      memoryLimitMiB: 2048,
-      cpu: 1024,
       executionRole: taskExecutionRole,
       taskRole: taskRole,
     });
@@ -236,6 +242,23 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
       image: ecs.ContainerImage.fromAsset(path.join(__dirname, '../../sdlc-manager-container')),
       logging: ecs.LogDrivers.awsLogs({
         streamPrefix: 'sdlc-manager',
+        logRetention: logs.RetentionDays.ONE_WEEK,
+      }),
+      environment: {
+        DEPLOYMENTS_TABLE: deploymentsTable.tableName,
+        AWS_ACCOUNT_ID: cdk.Stack.of(this).account,
+        AWS_REGION: cdk.Stack.of(this).region,
+      },
+    });
+
+    // ECS Task Definition for sanity tester
+    const sanityTesterTaskDefinition = new ecs.FargateTaskDefinition(this, 'SanityTesterTaskDef', {
+      memoryLimitMiB: 2048,
+      cpu: 1024,
+      executionRole: taskExecutionRole,
+      taskRole: taskRole,
+    });
+
     // Add container to sanity tester task definition
     const sanityTesterContainer = sanityTesterTaskDefinition.addContainer('SanityTesterContainer', {
       image: ecs.ContainerImage.fromAsset(path.join(__dirname, '../../sanity-tester-container')),
@@ -248,11 +271,6 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
         AWS_ACCOUNT_ID: cdk.Stack.of(this).account,
         AWS_REGION: cdk.Stack.of(this).region,
         // API_BASE_URL will be set by the API handler when triggering the task
-      },
-      secrets: {
-        // ANTHROPIC_API_KEY should be stored in AWS Secrets Manager
-        // For now, it can be passed as an environment variable during deployment
-        // In production, use: ecs.Secret.fromSecretsManager(secret)
       },
     });
 
@@ -274,7 +292,6 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
         FIXER_CONTAINER_NAME: fixerContainer.containerName,
         SDLC_MANAGER_TASK_DEFINITION_ARN: sdlcManagerTaskDefinition.taskDefinitionArn,
         SDLC_MANAGER_CONTAINER_NAME: sdlcManagerContainer.containerName,
-        // API_BASE_URL will be set after API Gateway is created
         SANITY_TESTER_TASK_DEFINITION_ARN: sanityTesterTaskDefinition.taskDefinitionArn,
         SANITY_TESTER_CONTAINER_NAME: sanityTesterContainer.containerName,
       },
@@ -303,10 +320,10 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
       new iam.PolicyStatement({
         effect: iam.Effect.ALLOW,
         actions: ['ecs:RunTask'],
-        resources: [taskDefinition.taskDefinitionArn, fixerTaskDefinition.taskDefinitionArn, sdlcManagerTaskDefinition.taskDefinitionArn],
         resources: [
           taskDefinition.taskDefinitionArn,
           fixerTaskDefinition.taskDefinitionArn,
+          sdlcManagerTaskDefinition.taskDefinitionArn,
           sanityTesterTaskDefinition.taskDefinitionArn,
         ],
       })
@@ -361,6 +378,9 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
     // POST /sdlc-deploy endpoint
     const sdlcDeployResource = api.root.addResource('sdlc-deploy');
     sdlcDeployResource.addMethod('POST', apiHandlerIntegration, {
+      apiKeyRequired: false, // Set to true and add API key for production
+    });
+
     // POST /sanity-test endpoint
     const sanityTestResource = api.root.addResource('sanity-test');
     sanityTestResource.addMethod('POST', apiHandlerIntegration, {
@@ -389,8 +409,8 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
     const analyzeSessionResource = analyzeResource.addResource('{sessionId}');
     analyzeSessionResource.addMethod('GET', analyzerIntegration);
 
-    // Update API Handler Lambda with API_BASE_URL now that API is created
-    apiHandlerLambda.addEnvironment('API_BASE_URL', api.url);
+    // Set API_BASE_URL using CloudFormation intrinsic function to avoid circular dependency
+    apiHandlerLambda.addEnvironment('API_BASE_URL', `https://${api.restApiId}.execute-api.${cdk.Stack.of(this).region}.amazonaws.com/prod/`);
 
     // Outputs
     new cdk.CfnOutput(this, 'ApiEndpoint', {
@@ -426,6 +446,8 @@ export class GitHubLambdaDeployerStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'SDLCManagerTaskDefinitionArn', {
       value: sdlcManagerTaskDefinition.taskDefinitionArn,
       description: 'SDLC Manager ECS Task Definition ARN',
+    });
+
     new cdk.CfnOutput(this, 'SanityTesterTaskDefinitionArn', {
       value: sanityTesterTaskDefinition.taskDefinitionArn,
       description: 'Sanity Tester ECS Task Definition ARN',

@@ -1,4 +1,4 @@
-import Anthropic from '@anthropic-ai/sdk';
+import { BedrockRuntimeClient, ConverseCommand } from '@aws-sdk/client-bedrock-runtime';
 
 export interface APIEndpoint {
   method: string;
@@ -36,12 +36,11 @@ export interface TestStep {
 }
 
 export class AIClient {
-  private client: Anthropic;
+  private client: BedrockRuntimeClient;
+  private modelId: string = 'amazon.nova-pro-v1:0';
 
-  constructor(apiKey: string) {
-    this.client = new Anthropic({
-      apiKey: apiKey,
-    });
+  constructor() {
+    this.client = new BedrockRuntimeClient({});
   }
 
   async discoverAPIs(
@@ -85,21 +84,26 @@ ${repositoryContext}
 
 Identify all API endpoints with their methods, paths, request/response schemas, and authentication requirements.`;
 
-    const message = await this.client.messages.create({
-      model: 'claude-sonnet-4-5-20250929',
-      max_tokens: 8192,
-      system: systemPrompt,
+    const command = new ConverseCommand({
+      modelId: this.modelId,
       messages: [
         {
           role: 'user',
-          content: userPrompt,
+          content: [{ text: userPrompt }],
         },
       ],
+      system: [{ text: systemPrompt }],
+      inferenceConfig: {
+        maxTokens: 8192,
+        temperature: 0.7,
+      },
     });
 
+    const response = await this.client.send(command);
+
     // Extract the text content from the response
-    const textContent = message.content.find((block) => block.type === 'text');
-    if (!textContent || textContent.type !== 'text') {
+    const textContent = response.output?.message?.content?.[0];
+    if (!textContent || !('text' in textContent) || !textContent.text) {
       throw new Error('No text content in AI response');
     }
 
@@ -158,21 +162,26 @@ ${JSON.stringify(stackInfo, null, 2)}
 
 Generate realistic sanity tests that cover the main user journeys. Ensure tests are ordered logically and use stored variables where needed.`;
 
-    const message = await this.client.messages.create({
-      model: 'claude-sonnet-4-5-20250929',
-      max_tokens: 8192,
-      system: systemPrompt,
+    const command = new ConverseCommand({
+      modelId: this.modelId,
       messages: [
         {
           role: 'user',
-          content: userPrompt,
+          content: [{ text: userPrompt }],
         },
       ],
+      system: [{ text: systemPrompt }],
+      inferenceConfig: {
+        maxTokens: 8192,
+        temperature: 0.7,
+      },
     });
 
+    const response = await this.client.send(command);
+
     // Extract the text content from the response
-    const textContent = message.content.find((block) => block.type === 'text');
-    if (!textContent || textContent.type !== 'text') {
+    const textContent = response.output?.message?.content?.[0];
+    if (!textContent || !('text' in textContent) || !textContent.text) {
       throw new Error('No text content in AI response');
     }
 
@@ -182,7 +191,7 @@ Generate realistic sanity tests that cover the main user journeys. Ensure tests 
       throw new Error('Could not extract JSON from AI response');
     }
 
-    const response = JSON.parse(jsonMatch[0]);
-    return response.tests || [];
+    const result = JSON.parse(jsonMatch[0]);
+    return result.tests || [];
   }
 }

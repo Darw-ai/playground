@@ -11,7 +11,6 @@ const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
 
 const DEPLOYMENTS_TABLE = process.env.DEPLOYMENTS_TABLE!;
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY!;
 
 // Container-specific environment variables (passed as overrides)
 const SESSION_ID = process.env.SESSION_ID!;
@@ -78,7 +77,7 @@ async function main() {
 
     // Discover APIs using AI
     await addLog(SESSION_ID, 'Discovering APIs with AI...');
-    const aiClient = new AIClient(ANTHROPIC_API_KEY);
+    const aiClient = new AIClient();
     const repositoryContext = inspector.createRepositoryContext(inspectionResult);
     const apiMap = await aiClient.discoverAPIs(repositoryContext, CUSTOM_ROOT_FOLDER || '/');
 

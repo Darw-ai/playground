@@ -9,7 +9,6 @@ const dynamoClient = new DynamoDBClient({});
 const docClient = DynamoDBDocumentClient.from(dynamoClient);
 
 const DEPLOYMENTS_TABLE = process.env.DEPLOYMENTS_TABLE!;
-const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY!;
 
 // Container-specific environment variables (passed as overrides)
 const SESSION_ID = process.env.SESSION_ID!;
@@ -74,7 +73,7 @@ async function main() {
     await addLog(SESSION_ID, 'Analyzing repository structure...');
 
     // Create fix plan using AI
-    const aiClient = new AIClient(ANTHROPIC_API_KEY);
+    const aiClient = new AIClient();
     await addLog(SESSION_ID, 'Creating fix plan with AI...');
 
     const fixPlan = await aiClient.createFixPlan(FIX_INSTRUCTIONS, repoContext, stackDetails);
